@@ -64,7 +64,7 @@ def process_single_image(image_rgb, sigma=1.0, low_ratio=0.05, high_ratio=0.15):
     grayscale = rgb_to_grayscale(image_rgb)
 
     # Generate ROI mask
-    roi_mask = generate_roi_mask(image_rgb, method='hsv', cleanup=True)
+    roi_mask = generate_roi_mask(image_rgb, method='auto', cleanup=True)
 
     # Run Canny edge detection
     edges, magnitude, direction = canny_edge_detection(

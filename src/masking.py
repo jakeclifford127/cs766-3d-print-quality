@@ -86,6 +86,63 @@ def threshold_background(hsv_image, h_range=None, s_range=(0.0, 0.3), v_range=(0
     return (~bg_mask).astype(np.uint8)
 
 
+def otsu_threshold(grayscale):
+    """Otsu's method — automatically find the optimal global threshold.
+
+    Exhaustively searches all possible thresholds (0-255) and picks
+    the one that minimizes intra-class variance (equivalently, maximizes
+    inter-class variance).  This is the standard formulation from
+    Nobuyuki Otsu's 1979 paper.
+
+    Args:
+        grayscale: 2D numpy array (float64, values 0-255)
+
+    Returns:
+        mask: binary mask (0 or 1), where 1 = foreground (brighter class)
+        threshold: the optimal threshold value
+    """
+    # Quantize to integer bins 0-255
+    pixel_vals = np.clip(grayscale, 0, 255).astype(np.uint8).ravel()
+    total_pixels = len(pixel_vals)
+
+    # Compute normalized histogram (256 bins)
+    hist = np.zeros(256, dtype=np.float64)
+    for v in pixel_vals:
+        hist[v] += 1
+    hist /= total_pixels
+
+    best_threshold = 0
+    best_variance = 0.0
+
+    # Cumulative sums for the background class (0..t)
+    w0 = 0.0   # weight (probability) of background class
+    sum0 = 0.0  # cumulative intensity sum for background
+
+    total_mean = np.sum(np.arange(256) * hist)  # global mean intensity
+
+    for t in range(256):
+        w0 += hist[t]
+        w1 = 1.0 - w0
+
+        if w0 == 0 or w1 == 0:
+            continue
+
+        sum0 += t * hist[t]
+
+        mean0 = sum0 / w0
+        mean1 = (total_mean - sum0) / w1
+
+        # Inter-class variance
+        variance = w0 * w1 * (mean0 - mean1) ** 2
+
+        if variance > best_variance:
+            best_variance = variance
+            best_threshold = t
+
+    mask = (grayscale > best_threshold).astype(np.uint8)
+    return mask, best_threshold
+
+
 def adaptive_threshold(grayscale, block_size=31, c=10):
     """Simple adaptive thresholding for foreground extraction.
 
@@ -283,31 +340,97 @@ def largest_component_mask(mask):
 # Full Masking Pipeline
 # ---------------------------------------------------------------------------
 
-def generate_roi_mask(image_rgb, method='hsv', cleanup=True):
+def _mask_quality(mask):
+    """Score a candidate ROI mask on how plausible it looks.
+
+    A good mask should cover a reasonable fraction of the image (not
+    nearly empty, not nearly full) and have a compact largest component.
+
+    Returns:
+        float score in [0, 1] — higher is better
+    """
+    total = mask.size
+    fg_ratio = np.sum(mask) / total
+
+    # Ideal foreground ratio is roughly 10%-70% of the image
+    if fg_ratio < 0.03 or fg_ratio > 0.90:
+        return 0.0
+
+    # Prefer masks near the middle of the range
+    # Peak score at ~30% foreground, tapering at extremes
+    ratio_score = 1.0 - abs(fg_ratio - 0.35) / 0.55
+    ratio_score = max(0.0, ratio_score)
+
+    return ratio_score
+
+
+def generate_roi_mask(image_rgb, method='auto', cleanup=True):
     """Generate a Region of Interest mask for the printed area.
+
+    When method='auto' (default), tries multiple segmentation strategies
+    and picks the one that produces the most plausible mask:
+      1. Otsu's method on grayscale (automatic global threshold)
+      2. HSV color thresholding (original approach, targets dark beds)
+      3. Otsu on the inverted image (handles light prints on light beds)
 
     Args:
         image_rgb: 3D numpy array (H, W, 3), uint8, RGB
-        method: 'hsv' for color thresholding, 'adaptive' for brightness
+        method: 'auto', 'otsu', 'hsv', or 'adaptive'
         cleanup: if True, apply morphological ops and keep largest component
 
     Returns:
         Binary ROI mask (1 = print area, 0 = background)
     """
-    if method == 'hsv':
+    gray = rgb_to_grayscale(image_rgb)
+
+    if method == 'auto':
+        candidates = []
+
+        # Candidate 1: Otsu on grayscale
+        otsu_mask, _ = otsu_threshold(gray)
+        candidates.append(otsu_mask)
+
+        # Candidate 2: HSV thresholding (original)
+        hsv = rgb_to_hsv(image_rgb)
+        hsv_mask = threshold_background(hsv)
+        candidates.append(hsv_mask)
+
+        # Candidate 3: Otsu on inverted image (for light-on-light)
+        inv_mask, _ = otsu_threshold(255.0 - gray)
+        candidates.append(inv_mask)
+
+        # Clean each candidate and score it
+        best_mask = None
+        best_score = -1.0
+
+        for candidate in candidates:
+            if cleanup:
+                cleaned = morph_open(candidate, kernel_size=5, iterations=1)
+                cleaned = morph_close(cleaned, kernel_size=5, iterations=1)
+                cleaned = largest_component_mask(cleaned)
+            else:
+                cleaned = candidate
+
+            score = _mask_quality(cleaned)
+            if score > best_score:
+                best_score = score
+                best_mask = cleaned
+
+        return best_mask
+
+    elif method == 'otsu':
+        mask, _ = otsu_threshold(gray)
+    elif method == 'hsv':
         hsv = rgb_to_hsv(image_rgb)
         mask = threshold_background(hsv)
     elif method == 'adaptive':
-        gray = rgb_to_grayscale(image_rgb)
         mask = adaptive_threshold(gray)
     else:
         raise ValueError(f"Unknown method: {method}")
 
     if cleanup:
-        # Remove small noise, fill small holes
         mask = morph_open(mask, kernel_size=5, iterations=1)
         mask = morph_close(mask, kernel_size=5, iterations=1)
-        # Keep only the largest connected region
         mask = largest_component_mask(mask)
 
     return mask

@@ -204,13 +204,13 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
     }
 
 
-def classify_layer(features, centroids=None):
+def classify_layer(features, class_params=None):
     """Classify a first layer based on extracted features.
 
-    Uses a nearest-centroid approach: computes the Euclidean distance (in
-    normalized feature space) from the sample to each class centroid and
-    picks the closest one.  Centroids are derived from the labeled training
-    data collected for this project.
+    Uses Mahalanobis distance to each class centroid.  Unlike simple
+    Euclidean distance, Mahalanobis accounts for the covariance structure
+    within each class — features that vary a lot within a class contribute
+    less to the distance, while tightly clustered features contribute more.
 
     Feature vector used:
         [fill_density, gradient_entropy, gradient_mean,
@@ -218,45 +218,78 @@ def classify_layer(features, centroids=None):
 
     Args:
         features: dict from extract_features()
-        centroids: dict mapping label -> feature vector, or None for defaults
+        class_params: dict mapping label -> (mean_vector, inv_covariance),
+                      or None for defaults derived from our training set
 
     Returns:
         label: string — 'optimal', 'under_extruded', or 'over_extruded'
         confidence: float 0-1
     """
-    # Feature keys used (order matters — must match centroids)
     feat_keys = [
         'fill_density', 'gradient_entropy', 'gradient_mean',
         'gradient_std', 'spectral_energy_ratio',
     ]
 
-    # Default centroids (mean feature values from our labeled dataset)
-    # and per-feature std for normalization
-    if centroids is None:
-        centroids = {
-            'optimal':        np.array([0.0444, 4.6278, 27.034, 58.531, 0.9514]),
-            'under_extruded': np.array([0.0567, 4.3267, 41.494, 63.027, 0.9066]),
-            'over_extruded':  np.array([0.0852, 4.6700, 36.302, 68.405, 0.9054]),
+    if class_params is None:
+        # Per-class means and inverse covariance matrices
+        # computed from labeled training data with Otsu auto-masking
+        class_params = {
+            'optimal': (
+                np.array([0.0409, 4.5164, 29.073, 54.837, 0.9406]),
+                np.array([[ 4.43242729e+03,  9.03564392e+01, -1.12049314e+01,
+                             4.46490972e+00, -1.14005490e+03],
+                           [ 9.03564392e+01,  7.84682507e+00, -3.56522409e-01,
+                             1.77720192e-01, -2.93445625e+01],
+                           [-1.12049314e+01, -3.56522409e-01,  4.42495417e-02,
+                            -1.70554516e-02,  3.67157850e+00],
+                           [ 4.46490972e+00,  1.77720192e-01, -1.70554516e-02,
+                             9.33815009e-03, -1.57208702e+00],
+                           [-1.14005490e+03, -2.93445625e+01,  3.67157850e+00,
+                            -1.57208702e+00,  7.42984342e+02]])
+            ),
+            'under_extruded': (
+                np.array([0.0482, 4.2708, 38.728, 67.093, 0.9120]),
+                np.array([[ 3.01226269e+03, -5.04672081e+01, -4.31582686e+00,
+                             1.82398943e-03,  2.06656507e+01],
+                           [-5.04672081e+01,  4.43067037e+00,  6.97222621e-02,
+                             2.46198169e-02, -1.78832631e+00],
+                           [-4.31582686e+00,  6.97222621e-02,  9.77690212e-03,
+                            -1.46630636e-03,  1.24631940e-02],
+                           [ 1.82398943e-03,  2.46198169e-02, -1.46630636e-03,
+                             3.74828928e-03,  1.85517873e-01],
+                           [ 2.06656507e+01, -1.78832631e+00,  1.24631940e-02,
+                             1.85517873e-01,  1.07862519e+02]])
+            ),
+            'over_extruded': (
+                np.array([0.0761, 4.5512, 38.395, 67.046, 0.9341]),
+                np.array([[ 3.61214737e+02,  5.58444414e+00, -5.17198242e-01,
+                             2.09810438e-01,  5.36813320e+01],
+                           [ 5.58444414e+00,  7.92013161e+00, -9.68245107e-02,
+                             1.00333557e-01,  8.54309499e+00],
+                           [-5.17198242e-01, -9.68245107e-02,  8.17645208e-03,
+                            -3.52094553e-03,  2.64935981e-01],
+                           [ 2.09810438e-01,  1.00333557e-01, -3.52094553e-03,
+                             2.55725079e-03,  2.25721580e-02],
+                           [ 5.36813320e+01,  8.54309499e+00,  2.64935981e-01,
+                             2.25721580e-02,  3.35210551e+02]])
+            ),
         }
-
-    # Pooled std for normalization (so each feature contributes equally)
-    feat_std = np.array([0.0475, 0.4750, 17.60, 27.50, 0.0930])
 
     # Build sample vector
     sample = np.array([features[k] for k in feat_keys])
 
-    # Normalized distances to each centroid
+    # Mahalanobis distance to each class
     distances = {}
-    for label, centroid in centroids.items():
-        diff = (sample - centroid) / (feat_std + 1e-9)
-        distances[label] = np.sqrt(np.sum(diff ** 2))
+    for label, (mean_vec, inv_cov) in class_params.items():
+        diff = sample - mean_vec
+        # Mahalanobis: sqrt( (x-mu)^T * Sigma^{-1} * (x-mu) )
+        distances[label] = np.sqrt(np.dot(diff, np.dot(inv_cov, diff)))
 
-    # Pick the nearest centroid
+    # Pick the nearest class
     best_label = min(distances, key=distances.get)
     best_dist = distances[best_label]
 
-    # Confidence: inverse of distance (closer = more confident)
-    # Scale so distance=0 → confidence=1, distance=5 → confidence≈0.37
-    confidence = np.exp(-best_dist / 3.0)
+    # Confidence: inverse of Mahalanobis distance
+    confidence = np.exp(-best_dist / 5.0)
 
     return best_label, float(confidence)
