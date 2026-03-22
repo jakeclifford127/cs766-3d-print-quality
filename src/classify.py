@@ -275,15 +275,26 @@ def classify_layer(features, class_params=None):
             ),
         }
 
+    # Per-class weights (prior bias).  A lower weight makes a class
+    # "easier" to match by scaling its distance down.  Determined via
+    # grid search over the training set — should be validated on
+    # held-out data to confirm generalization.
+    class_weights = {
+        'optimal':        0.80,
+        'under_extruded': 1.40,
+        'over_extruded':  1.20,
+    }
+
     # Build sample vector
     sample = np.array([features[k] for k in feat_keys])
 
-    # Mahalanobis distance to each class
+    # Mahalanobis distance to each class, scaled by class weight
     distances = {}
     for label, (mean_vec, inv_cov) in class_params.items():
         diff = sample - mean_vec
         # Mahalanobis: sqrt( (x-mu)^T * Sigma^{-1} * (x-mu) )
-        distances[label] = np.sqrt(np.dot(diff, np.dot(inv_cov, diff)))
+        raw_dist = np.sqrt(np.dot(diff, np.dot(inv_cov, diff)))
+        distances[label] = raw_dist * class_weights[label]
 
     # Pick the nearest class
     best_label = min(distances, key=distances.get)
