@@ -110,6 +110,104 @@ def gradient_magnitude_stats(magnitude, roi_mask):
     }
 
 
+def gradient_direction_kurtosis(magnitude, direction, roi_mask):
+    """Compute kurtosis of the gradient direction histogram.
+
+    Over-extruded layers tend to have more uniform gradient directions
+    (lower kurtosis) while under-extruded layers show sharper directional
+    peaks from line gaps (higher kurtosis).
+
+    Args:
+        magnitude: 2D gradient magnitude
+        direction: 2D gradient direction (radians)
+        roi_mask: 2D binary ROI mask
+
+    Returns:
+        kurtosis: float, excess kurtosis of the direction histogram
+    """
+    hist, _ = compute_gradient_histogram(magnitude, direction, roi_mask)
+    mean = np.mean(hist)
+    std = np.std(hist) + 1e-8
+    return float(np.mean(((hist - mean) / std) ** 4))
+
+
+# ---------------------------------------------------------------------------
+# Edge Spatial Analysis
+# ---------------------------------------------------------------------------
+
+def compute_edge_density_cv(edges, roi_mask, num_patches=8):
+    """Compute coefficient of variation of edge density across patches.
+
+    Measures texture regularity: well-extruded layers have uniform edge
+    density, while defects create uneven patches of high/low density.
+
+    Args:
+        edges: 2D binary edge map (0 or 255)
+        roi_mask: 2D binary ROI mask
+        num_patches: number of patches along each axis
+
+    Returns:
+        cv: float, coefficient of variation (std/mean) of patch densities
+    """
+    edge_in_roi = ((edges > 0).astype(np.uint8)) * roi_mask
+    h, w = edges.shape
+    patch_size = max(h, w) // num_patches
+
+    if patch_size == 0:
+        return 0.0
+
+    densities = []
+    for i in range(0, h - patch_size, patch_size):
+        for j in range(0, w - patch_size, patch_size):
+            patch_roi = roi_mask[i:i + patch_size, j:j + patch_size]
+            patch_edge = edge_in_roi[i:i + patch_size, j:j + patch_size]
+            area = np.sum(patch_roi)
+            if area > patch_size * patch_size * 0.1:
+                densities.append(np.sum(patch_edge) / area)
+
+    if not densities or np.mean(densities) == 0:
+        return 0.0
+    return float(np.std(densities) / np.mean(densities))
+
+
+def compute_edge_to_gradient_ratio(edges, magnitude, roi_mask):
+    """Compute ratio of edge pixels to high-gradient pixels inside ROI.
+
+    Over-extruded layers tend to have a higher fraction of strong
+    gradients that survive as edges, while under-extruded layers have
+    weaker, more fragmented edges relative to their gradient field.
+
+    Args:
+        edges: 2D binary edge map (0 or 255)
+        magnitude: 2D gradient magnitude
+        roi_mask: 2D binary ROI mask
+
+    Returns:
+        ratio: float, edge pixels / high-gradient pixels
+    """
+    edge_in_roi = ((edges > 0).astype(np.uint8)) * roi_mask
+    total_edge = np.sum(edge_in_roi)
+
+    roi_mag = magnitude[roi_mask > 0]
+    if len(roi_mag) == 0:
+        return 0.0
+
+    high_grad_count = np.sum(roi_mag > np.percentile(roi_mag, 75))
+    return float(total_edge / (high_grad_count + 1))
+
+
+def compute_roi_coverage(roi_mask):
+    """Compute fraction of image covered by the ROI.
+
+    Args:
+        roi_mask: 2D binary ROI mask
+
+    Returns:
+        coverage: float in [0, 1]
+    """
+    return float(np.sum(roi_mask) / roi_mask.size)
+
+
 # ---------------------------------------------------------------------------
 # Fourier-Domain Analysis
 # ---------------------------------------------------------------------------
@@ -191,6 +289,10 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
     grad_entropy = gradient_direction_entropy(magnitude, direction, roi_mask)
     grad_stats = gradient_magnitude_stats(magnitude, roi_mask)
     _, dominant_freq, spectral_ratio = compute_frequency_profile(grayscale, roi_mask)
+    grad_dir_kurtosis = gradient_direction_kurtosis(magnitude, direction, roi_mask)
+    edge_density_cv = compute_edge_density_cv(edges, roi_mask)
+    edge_to_grad = compute_edge_to_gradient_ratio(edges, magnitude, roi_mask)
+    roi_cov = compute_roi_coverage(roi_mask)
 
     return {
         'fill_density': fill_density,
@@ -201,100 +303,90 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
         'high_gradient_ratio': grad_stats['high_gradient_ratio'],
         'dominant_frequency': dominant_freq,
         'spectral_energy_ratio': spectral_ratio,
+        'gradient_dir_kurtosis': grad_dir_kurtosis,
+        'edge_density_cv': edge_density_cv,
+        'edge_to_gradient_ratio': edge_to_grad,
+        'roi_coverage': roi_cov,
     }
 
 
-def classify_layer(features, class_params=None):
+def classify_layer(features, class_centroids=None, shared_inv_cov=None):
     """Classify a first layer based on extracted features.
 
-    Uses Mahalanobis distance to each class centroid.  Unlike simple
-    Euclidean distance, Mahalanobis accounts for the covariance structure
-    within each class — features that vary a lot within a class contribute
-    less to the distance, while tightly clustered features contribute more.
+    Uses LDA-style Mahalanobis distance with a shared (pooled) within-class
+    covariance matrix.  This is more robust to distribution shift than
+    per-class covariances, which can overfit when training data is limited.
 
-    Feature vector used:
-        [fill_density, gradient_entropy, gradient_mean,
-         gradient_std, spectral_energy_ratio]
+    Feature vector (7 features chosen for cross-dataset generalization):
+        [fill_density, gradient_entropy, gradient_dir_kurtosis,
+         edge_to_gradient_ratio, spectral_energy_ratio,
+         edge_density_cv, roi_coverage]
 
     Args:
         features: dict from extract_features()
-        class_params: dict mapping label -> (mean_vector, inv_covariance),
-                      or None for defaults derived from our training set
+        class_centroids: dict mapping label -> mean_vector,
+                         or None for defaults trained on data+data2
+        shared_inv_cov: shared inverse covariance matrix,
+                        or None for default
 
     Returns:
         label: string — 'optimal', 'under_extruded', or 'over_extruded'
         confidence: float 0-1
     """
     feat_keys = [
-        'fill_density', 'gradient_entropy', 'gradient_mean',
-        'gradient_std', 'spectral_energy_ratio',
+        'fill_density', 'gradient_entropy', 'gradient_dir_kurtosis',
+        'edge_to_gradient_ratio', 'spectral_energy_ratio',
+        'edge_density_cv', 'roi_coverage',
     ]
 
-    if class_params is None:
-        # Per-class means and inverse covariance matrices
-        # computed from labeled training data with Otsu auto-masking
-        class_params = {
-            'optimal': (
-                np.array([0.0409, 4.5164, 29.073, 54.837, 0.9406]),
-                np.array([[ 4.43242729e+03,  9.03564392e+01, -1.12049314e+01,
-                             4.46490972e+00, -1.14005490e+03],
-                           [ 9.03564392e+01,  7.84682507e+00, -3.56522409e-01,
-                             1.77720192e-01, -2.93445625e+01],
-                           [-1.12049314e+01, -3.56522409e-01,  4.42495417e-02,
-                            -1.70554516e-02,  3.67157850e+00],
-                           [ 4.46490972e+00,  1.77720192e-01, -1.70554516e-02,
-                             9.33815009e-03, -1.57208702e+00],
-                           [-1.14005490e+03, -2.93445625e+01,  3.67157850e+00,
-                            -1.57208702e+00,  7.42984342e+02]])
-            ),
-            'under_extruded': (
-                np.array([0.0482, 4.2708, 38.728, 67.093, 0.9120]),
-                np.array([[ 3.01226269e+03, -5.04672081e+01, -4.31582686e+00,
-                             1.82398943e-03,  2.06656507e+01],
-                           [-5.04672081e+01,  4.43067037e+00,  6.97222621e-02,
-                             2.46198169e-02, -1.78832631e+00],
-                           [-4.31582686e+00,  6.97222621e-02,  9.77690212e-03,
-                            -1.46630636e-03,  1.24631940e-02],
-                           [ 1.82398943e-03,  2.46198169e-02, -1.46630636e-03,
-                             3.74828928e-03,  1.85517873e-01],
-                           [ 2.06656507e+01, -1.78832631e+00,  1.24631940e-02,
-                             1.85517873e-01,  1.07862519e+02]])
-            ),
-            'over_extruded': (
-                np.array([0.0761, 4.5512, 38.395, 67.046, 0.9341]),
-                np.array([[ 3.61214737e+02,  5.58444414e+00, -5.17198242e-01,
-                             2.09810438e-01,  5.36813320e+01],
-                           [ 5.58444414e+00,  7.92013161e+00, -9.68245107e-02,
-                             1.00333557e-01,  8.54309499e+00],
-                           [-5.17198242e-01, -9.68245107e-02,  8.17645208e-03,
-                            -3.52094553e-03,  2.64935981e-01],
-                           [ 2.09810438e-01,  1.00333557e-01, -3.52094553e-03,
-                             2.55725079e-03,  2.25721580e-02],
-                           [ 5.36813320e+01,  8.54309499e+00,  2.64935981e-01,
-                             2.25721580e-02,  3.35210551e+02]])
-            ),
+    if class_centroids is None:
+        # Per-class centroids computed from combined labeled data
+        # (data + data2) with auto-masking
+        class_centroids = {
+            'optimal': np.array([
+                0.0404, 4.5285, 10.0473, 0.1615, 0.9468, 0.8981, 0.2699]),
+            'under_extruded': np.array([
+                0.0619, 4.4120,  9.4922, 0.2475, 0.9245, 0.6712, 0.2968]),
+            'over_extruded': np.array([
+                0.0791, 4.6789,  7.4641, 0.3165, 0.9406, 0.6132, 0.2842]),
         }
 
-    # Per-class weights (prior bias).  A lower weight makes a class
-    # "easier" to match by scaling its distance down.  Determined via
-    # grid search over the training set — should be validated on
-    # held-out data to confirm generalization.
-    class_weights = {
-        'optimal':        0.80,
-        'under_extruded': 1.40,
-        'over_extruded':  1.20,
-    }
+    if shared_inv_cov is None:
+        # Pooled within-class inverse covariance (LDA-style),
+        # computed from combined labeled data with regularization
+        shared_inv_cov = np.array([
+            [ 9.41484403e+03, -9.10312621e-02,  3.12987826e-02,
+             -2.34028216e+03, -1.93211219e+00,  4.05941386e+00,
+             -1.99148419e+00],
+            [-9.10312621e-02,  5.48355770e+00,  2.08271252e-01,
+             -4.06745626e-01, -6.05945727e-02,  6.82930999e-01,
+             -3.13900711e+00],
+            [ 3.12987826e-02,  2.08271252e-01,  4.91479287e-02,
+              1.26093229e-01,  1.11349857e+00,  2.61236621e-02,
+              1.37410256e-01],
+            [-2.34028216e+03, -4.06745626e-01,  1.26093229e-01,
+              6.40160087e+02, -8.96707068e+00,  1.62214188e+01,
+             -9.01182050e+00],
+            [-1.93211219e+00, -6.05945727e-02,  1.11349857e+00,
+             -8.96707068e+00,  2.84350939e+02, -8.75428957e+00,
+              2.52217428e+01],
+            [ 4.05941386e+00,  6.82930999e-01,  2.61236621e-02,
+              1.62214188e+01, -8.75428957e+00,  1.24424613e+01,
+             -3.75886416e+00],
+            [-1.99148419e+00, -3.13900711e+00,  1.37410256e-01,
+             -9.01182050e+00,  2.52217428e+01, -3.75886416e+00,
+              5.02935104e+01],
+        ])
 
     # Build sample vector
     sample = np.array([features[k] for k in feat_keys])
 
-    # Mahalanobis distance to each class, scaled by class weight
+    # Mahalanobis distance to each class centroid (no class weights —
+    # removed to avoid bias that hurt generalization on new data)
     distances = {}
-    for label, (mean_vec, inv_cov) in class_params.items():
+    for label, mean_vec in class_centroids.items():
         diff = sample - mean_vec
-        # Mahalanobis: sqrt( (x-mu)^T * Sigma^{-1} * (x-mu) )
-        raw_dist = np.sqrt(np.dot(diff, np.dot(inv_cov, diff)))
-        distances[label] = raw_dist * class_weights[label]
+        distances[label] = np.sqrt(np.dot(diff, np.dot(shared_inv_cov, diff)))
 
     # Pick the nearest class
     best_label = min(distances, key=distances.get)
