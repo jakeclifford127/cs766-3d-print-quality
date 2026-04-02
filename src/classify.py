@@ -269,6 +269,211 @@ def compute_frequency_profile(grayscale, roi_mask):
 
 
 # ---------------------------------------------------------------------------
+# Line-Spacing Uniformity
+# ---------------------------------------------------------------------------
+
+def detect_line_direction(magnitude, direction, roi_mask):
+    """Detect the dominant extrusion line direction using gradient histogram.
+
+    The gradient direction is perpendicular to the line direction, so we
+    rotate by 90 degrees to get the actual line orientation.
+
+    Returns:
+        (line_angle_deg, confidence): line angle in degrees [0, 180),
+            confidence is peak-to-mean ratio of the histogram (higher = clearer direction)
+    """
+    hist, _ = compute_gradient_histogram(magnitude, direction, roi_mask, num_bins=36)
+    if hist is None or np.sum(hist) == 0:
+        return 0.0, 0.0
+
+    # Find peak bin
+    peak_bin = np.argmax(hist)
+    peak_val = hist[peak_bin]
+    mean_val = np.mean(hist)
+
+    # Confidence: how much the peak stands out
+    confidence = peak_val / mean_val if mean_val > 0 else 0.0
+
+    # Parabolic interpolation for sub-bin precision
+    n = len(hist)
+    left = hist[(peak_bin - 1) % n]
+    right = hist[(peak_bin + 1) % n]
+    denom = 2.0 * (2.0 * peak_val - left - right)
+    if abs(denom) > 1e-10:
+        offset = (left - right) / denom
+    else:
+        offset = 0.0
+
+    # Gradient angle in degrees (each bin = 180/36 = 5 degrees)
+    grad_angle = (peak_bin + offset) * (180.0 / n)
+    # Line direction is perpendicular to gradient direction
+    line_angle = (grad_angle + 90.0) % 180.0
+
+    return line_angle, confidence
+
+
+def sample_perpendicular_profiles(grayscale, roi_mask, line_angle_deg, num_profiles=20):
+    """Sample intensity profiles perpendicular to the extrusion line direction.
+
+    Generates scan lines across the ROI oriented perpendicular to the detected
+    line direction, sampling grayscale intensity along each.
+
+    Returns:
+        list of 1D numpy arrays (intensity profiles), each with >= 20 samples
+    """
+    h, w = grayscale.shape
+    # Perpendicular direction (same as gradient direction)
+    perp_rad = np.deg2rad(line_angle_deg)  # line dir; perp to lines = line_dir itself rotated
+    # Actually: line_angle is the line direction. We want to scan PERPENDICULAR to lines.
+    # Perpendicular to the line direction = the gradient direction = line_angle - 90
+    scan_rad = np.deg2rad(line_angle_deg - 90.0)
+    dx = np.cos(scan_rad)
+    dy = np.sin(scan_rad)
+
+    # Line direction for distributing scan line starting positions
+    line_dx = np.cos(np.deg2rad(line_angle_deg))
+    line_dy = np.sin(np.deg2rad(line_angle_deg))
+
+    # Find ROI bounding box center
+    rows, cols = np.where(roi_mask > 0)
+    if len(rows) == 0:
+        return []
+    cy, cx = np.mean(rows), np.mean(cols)
+    roi_h = rows.max() - rows.min()
+    roi_w = cols.max() - cols.min()
+    max_extent = max(roi_h, roi_w)
+
+    # Distribute scan line origins along the line direction
+    offsets = np.linspace(-max_extent / 2, max_extent / 2, num_profiles)
+    profiles = []
+
+    for off in offsets:
+        # Starting point: center + offset along line direction
+        start_y = cy + off * line_dy
+        start_x = cx + off * line_dx
+
+        # Sample along the scan (perpendicular) direction
+        t_range = np.arange(-max_extent, max_extent + 1)
+        ys = (start_y + t_range * dy).astype(int)
+        xs = (start_x + t_range * dx).astype(int)
+
+        # Keep only valid, in-ROI pixels
+        valid = (ys >= 0) & (ys < h) & (xs >= 0) & (xs < w)
+        ys, xs = ys[valid], xs[valid]
+        in_roi = roi_mask[ys, xs] > 0
+        ys, xs = ys[in_roi], xs[in_roi]
+
+        if len(ys) >= 20:
+            profiles.append(grayscale[ys, xs].astype(np.float64))
+
+    return profiles
+
+
+def find_1d_peaks(profile, min_prominence_ratio=0.1):
+    """Find peaks in a 1D intensity profile.
+
+    Smooths the profile with a small Gaussian, then detects local maxima
+    with sufficient prominence.
+
+    Returns:
+        numpy array of peak indices
+    """
+    # Smooth with 1D Gaussian (sigma=2)
+    sigma = 2.0
+    radius = int(3 * sigma)
+    x = np.arange(-radius, radius + 1)
+    kernel = np.exp(-x**2 / (2 * sigma**2))
+    kernel = kernel / kernel.sum()
+    smoothed = np.convolve(profile, kernel, mode='same')
+
+    # Find local maxima
+    peaks = []
+    for i in range(1, len(smoothed) - 1):
+        if smoothed[i] > smoothed[i - 1] and smoothed[i] > smoothed[i + 1]:
+            peaks.append(i)
+
+    if len(peaks) == 0:
+        return np.array([], dtype=int)
+
+    # Filter by prominence
+    profile_range = smoothed.max() - smoothed.min()
+    if profile_range < 1e-10:
+        return np.array([], dtype=int)
+
+    min_prominence = min_prominence_ratio * profile_range
+    strong_peaks = []
+    for p in peaks:
+        # Find nearest valleys on each side
+        left_valley = smoothed[p]
+        for j in range(p - 1, -1, -1):
+            if smoothed[j] < left_valley:
+                left_valley = smoothed[j]
+            if j < len(smoothed) - 1 and smoothed[j] > smoothed[j + 1] and j != p:
+                break
+        right_valley = smoothed[p]
+        for j in range(p + 1, len(smoothed)):
+            if smoothed[j] < right_valley:
+                right_valley = smoothed[j]
+            if j > 0 and smoothed[j] > smoothed[j - 1] and j != p:
+                break
+        prominence = smoothed[p] - (left_valley + right_valley) / 2.0
+        if prominence >= min_prominence:
+            strong_peaks.append(p)
+
+    return np.array(strong_peaks, dtype=int)
+
+
+def compute_line_spacing_uniformity(grayscale, magnitude, direction, roi_mask):
+    """Compute line-spacing uniformity metric.
+
+    Measures how regular the extrusion line spacing is by:
+    1. Detecting the dominant line direction
+    2. Sampling intensity profiles perpendicular to lines
+    3. Finding peaks (line centers) in each profile
+    4. Computing the coefficient of variation of peak spacing
+
+    Returns:
+        float in (0, 1]: 1.0 = perfectly uniform spacing, lower = more irregular.
+        Returns 0.5 (neutral) if insufficient data.
+    """
+    roi_area = np.sum(roi_mask)
+    if roi_area == 0:
+        return 0.5
+
+    # Step 1: Detect line direction
+    line_angle, confidence = detect_line_direction(magnitude, direction, roi_mask)
+    if confidence < 1.5:
+        return 0.5  # No clear line direction
+
+    # Step 2: Sample perpendicular profiles
+    profiles = sample_perpendicular_profiles(grayscale, roi_mask, line_angle)
+    if len(profiles) == 0:
+        return 0.5
+
+    # Step 3: Find peaks and collect spacings
+    all_spacings = []
+    for prof in profiles:
+        peaks = find_1d_peaks(prof)
+        if len(peaks) >= 2:
+            spacings = np.diff(peaks)
+            all_spacings.extend(spacings.tolist())
+
+    # Step 4: Compute uniformity
+    if len(all_spacings) < 5:
+        return 0.5  # Insufficient data
+
+    spacings_arr = np.array(all_spacings, dtype=np.float64)
+    mean_spacing = np.mean(spacings_arr)
+    if mean_spacing < 1e-10:
+        return 0.5
+
+    cv = np.std(spacings_arr) / mean_spacing
+    uniformity = 1.0 / (1.0 + cv)
+
+    return float(uniformity)
+
+
+# ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
@@ -293,6 +498,8 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
     edge_density_cv = compute_edge_density_cv(edges, roi_mask)
     edge_to_grad = compute_edge_to_gradient_ratio(edges, magnitude, roi_mask)
     roi_cov = compute_roi_coverage(roi_mask)
+    line_uniformity = compute_line_spacing_uniformity(
+        grayscale, magnitude, direction, roi_mask)
 
     return {
         'fill_density': fill_density,
@@ -307,6 +514,7 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
         'edge_density_cv': edge_density_cv,
         'edge_to_gradient_ratio': edge_to_grad,
         'roi_coverage': roi_cov,
+        'line_spacing_uniformity': line_uniformity,
     }
 
 
@@ -317,10 +525,10 @@ def classify_layer(features, class_centroids=None, shared_inv_cov=None):
     covariance matrix.  This is more robust to distribution shift than
     per-class covariances, which can overfit when training data is limited.
 
-    Feature vector (7 features chosen for cross-dataset generalization):
+    Feature vector (8 features chosen for cross-dataset generalization):
         [fill_density, gradient_entropy, gradient_dir_kurtosis,
          edge_to_gradient_ratio, spectral_energy_ratio,
-         edge_density_cv, roi_coverage]
+         edge_density_cv, roi_coverage, line_spacing_uniformity]
 
     Args:
         features: dict from extract_features()
@@ -336,46 +544,51 @@ def classify_layer(features, class_centroids=None, shared_inv_cov=None):
     feat_keys = [
         'fill_density', 'gradient_entropy', 'gradient_dir_kurtosis',
         'edge_to_gradient_ratio', 'spectral_energy_ratio',
-        'edge_density_cv', 'roi_coverage',
+        'edge_density_cv', 'roi_coverage', 'line_spacing_uniformity',
     ]
 
     if class_centroids is None:
-        # Per-class centroids computed from combined labeled data
-        # (data + data2) with auto-masking
+        # Per-class centroids computed from labeled data with auto-masking
         class_centroids = {
             'optimal': np.array([
-                0.0404, 4.5285, 10.0473, 0.1615, 0.9468, 0.8981, 0.2699]),
+                0.0409, 4.5164, 8.9199, 0.1634, 0.9406, 0.8548,
+                0.2560, 0.5618]),
             'under_extruded': np.array([
-                0.0619, 4.4120,  9.4922, 0.2475, 0.9245, 0.6712, 0.2968]),
+                0.0482, 4.2708, 10.4468, 0.1927, 0.9120, 0.6681,
+                0.3155, 0.6059]),
             'over_extruded': np.array([
-                0.0791, 4.6789,  7.4641, 0.3165, 0.9406, 0.6132, 0.2842]),
+                0.0761, 4.5512, 7.3627, 0.3044, 0.9341, 0.6382,
+                0.2928, 0.6366]),
         }
 
     if shared_inv_cov is None:
         # Pooled within-class inverse covariance (LDA-style),
-        # computed from combined labeled data with regularization
+        # computed from labeled data with regularization
         shared_inv_cov = np.array([
-            [ 9.41484403e+03, -9.10312621e-02,  3.12987826e-02,
-             -2.34028216e+03, -1.93211219e+00,  4.05941386e+00,
-             -1.99148419e+00],
-            [-9.10312621e-02,  5.48355770e+00,  2.08271252e-01,
-             -4.06745626e-01, -6.05945727e-02,  6.82930999e-01,
-             -3.13900711e+00],
-            [ 3.12987826e-02,  2.08271252e-01,  4.91479287e-02,
-              1.26093229e-01,  1.11349857e+00,  2.61236621e-02,
-              1.37410256e-01],
-            [-2.34028216e+03, -4.06745626e-01,  1.26093229e-01,
-              6.40160087e+02, -8.96707068e+00,  1.62214188e+01,
-             -9.01182050e+00],
-            [-1.93211219e+00, -6.05945727e-02,  1.11349857e+00,
-             -8.96707068e+00,  2.84350939e+02, -8.75428957e+00,
-              2.52217428e+01],
-            [ 4.05941386e+00,  6.82930999e-01,  2.61236621e-02,
-              1.62214188e+01, -8.75428957e+00,  1.24424613e+01,
-             -3.75886416e+00],
-            [-1.99148419e+00, -3.13900711e+00,  1.37410256e-01,
-             -9.01182050e+00,  2.52217428e+01, -3.75886416e+00,
-              5.02935104e+01],
+            [ 9.63480620e+01,  1.58707299e-01,  4.10842189e-02,
+             -1.46050075e+01,  4.16966067e-01,  2.47085427e+00,
+             -8.15433888e-01,  2.37805746e-01],
+            [ 1.58707299e-01,  4.76683157e+00,  2.35736001e-01,
+              6.34726300e-01,  1.04021284e+00,  7.44802720e-01,
+             -2.76440629e+00,  7.48232249e-01],
+            [ 4.10842189e-02,  2.35736001e-01,  6.09027322e-02,
+              1.64335862e-01,  4.76309669e-01,  9.05561459e-02,
+             -1.10472298e-02, -6.29213421e-02],
+            [-1.46050075e+01,  6.34726300e-01,  1.64335862e-01,
+              4.15909364e+01,  1.66453948e+00,  9.88180244e+00,
+             -3.26890416e+00,  9.51919668e-01],
+            [ 4.16966067e-01,  1.04021284e+00,  4.76309669e-01,
+              1.66453948e+00,  6.99571245e+01, -6.02505609e-01,
+              4.98408593e+00,  4.37715308e-01],
+            [ 2.47085427e+00,  7.44802720e-01,  9.05561459e-02,
+              9.88180244e+00, -6.02505609e-01,  9.71218615e+00,
+             -1.21747756e+00,  4.89702496e+00],
+            [-8.15433888e-01, -2.76440629e+00, -1.10472298e-02,
+             -3.26890416e+00,  4.98408593e+00, -1.21747756e+00,
+              2.86262490e+01,  4.66282462e+00],
+            [ 2.37805746e-01,  7.48232249e-01, -6.29213421e-02,
+              9.51919668e-01,  4.37715308e-01,  4.89702496e+00,
+              4.66282462e+00,  6.78464958e+01],
         ])
 
     # Build sample vector
