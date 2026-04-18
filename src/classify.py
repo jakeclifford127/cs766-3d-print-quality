@@ -691,6 +691,224 @@ def compute_hough_features(edges, magnitude, direction, roi_mask):
 
 
 # ---------------------------------------------------------------------------
+# k-Means Texture Segmentation
+# ---------------------------------------------------------------------------
+
+def compute_local_texture_stats(grayscale, edges, roi_mask, patch_size=7):
+    """Compute per-pixel local texture features using integral images.
+
+    For each pixel in the ROI, computes a 3-element feature vector from
+    its local neighborhood: [local_mean, local_variance, local_edge_density].
+
+    Uses integral images (summed area tables) for O(1) per-pixel computation
+    regardless of patch size.
+
+    Args:
+        grayscale: 2D float64 image
+        edges: 2D binary edge map (0 or 255)
+        roi_mask: 2D binary ROI mask
+        patch_size: odd int, neighborhood size (default 7)
+
+    Returns:
+        feature_vectors: float64 [N, 3] — local features for N ROI pixels
+        roi_indices: tuple (rows, cols) of ROI pixel coordinates
+    """
+    half = patch_size // 2
+    H, W = grayscale.shape
+
+    # Pad images for boundary handling
+    gray_pad = np.pad(grayscale, half, mode='reflect')
+    edge_binary = (edges > 0).astype(np.float64)
+    edge_pad = np.pad(edge_binary, half, mode='constant', constant_values=0)
+
+    # Integral images with zero-prepended row/col for clean indexing
+    # After padding, shape is (H + 2*half, W + 2*half)
+    # Prepend zeros: shape becomes (H + 2*half + 1, W + 2*half + 1)
+    def make_integral(img):
+        sat = np.zeros((img.shape[0] + 1, img.shape[1] + 1), dtype=np.float64)
+        np.cumsum(img, axis=0, out=sat[1:, 1:])
+        np.cumsum(sat[1:, 1:], axis=1, out=sat[1:, 1:])
+        return sat
+
+    integral = make_integral(gray_pad)
+    integral_sq = make_integral(gray_pad ** 2)
+    integral_edge = make_integral(edge_pad)
+
+    # Box sum for patch centered at original pixel (i, j):
+    # In padded image, (i, j) maps to (i+half, j+half)
+    # Patch top-left in padded = (i, j), bottom-right = (i + ps - 1, j + ps - 1)
+    # SAT sum = I[r2+1, c2+1] - I[r1, c2+1] - I[r2+1, c1] + I[r1, c1]
+    # r1 = i, c1 = j, r2 = i + ps - 1
+    ps = patch_size
+    count = ps * ps
+
+    # For all original pixels [0..H-1, 0..W-1]:
+    # r1 = 0..H-1, c1 = 0..W-1  (top-left of patch in padded coords)
+    # r2+1 = ps..H+ps-1+1 = ps..H+ps
+    local_sum = (integral[ps:H+ps, ps:W+ps]
+                 - integral[:H, ps:W+ps]
+                 - integral[ps:H+ps, :W]
+                 + integral[:H, :W])
+
+    local_sum_sq = (integral_sq[ps:H+ps, ps:W+ps]
+                    - integral_sq[:H, ps:W+ps]
+                    - integral_sq[ps:H+ps, :W]
+                    + integral_sq[:H, :W])
+
+    local_edge_sum = (integral_edge[ps:H+ps, ps:W+ps]
+                      - integral_edge[:H, ps:W+ps]
+                      - integral_edge[ps:H+ps, :W]
+                      + integral_edge[:H, :W])
+
+    local_mean = local_sum / count
+    local_var = np.maximum((local_sum_sq / count) - (local_mean ** 2), 0.0)
+    local_edge_density = local_edge_sum / count
+
+    # Extract only ROI pixels
+    roi_rows, roi_cols = np.where(roi_mask > 0)
+    feature_vectors = np.column_stack([
+        local_mean[roi_rows, roi_cols],
+        local_var[roi_rows, roi_cols],
+        local_edge_density[roi_rows, roi_cols],
+    ])
+
+    return feature_vectors, (roi_rows, roi_cols)
+
+
+def kmeans_cluster(X, k=3, max_iter=20, seed=42):
+    """From-scratch k-Means clustering with k-Means++ initialization.
+
+    Args:
+        X: float64 [N, D] — feature matrix
+        k: number of clusters
+        max_iter: maximum iterations
+        seed: random seed for reproducibility
+
+    Returns:
+        labels: int [N] — cluster assignments (0 to k-1)
+        centers: float64 [k, D] — cluster centers in original scale
+    """
+    N, D = X.shape
+    rng = np.random.RandomState(seed)
+
+    # Feature normalization to [0, 1]
+    feat_min = X.min(axis=0)
+    feat_range = X.max(axis=0) - feat_min
+    feat_range[feat_range < 1e-10] = 1.0
+    X_norm = (X - feat_min) / feat_range
+
+    # k-Means++ initialization
+    centers = np.empty((k, D), dtype=np.float64)
+    centers[0] = X_norm[rng.randint(N)]
+
+    for c in range(1, k):
+        dists = np.min(
+            [np.sum((X_norm - centers[j]) ** 2, axis=1) for j in range(c)],
+            axis=0)
+        probs = dists / (dists.sum() + 1e-10)
+        cumulative = np.cumsum(probs)
+        idx = min(np.searchsorted(cumulative, rng.rand()), N - 1)
+        centers[c] = X_norm[idx]
+
+    # Main loop
+    labels = np.zeros(N, dtype=np.intp)
+    for iteration in range(max_iter):
+        # Assignment: squared Euclidean distance to each center
+        X_sq = np.sum(X_norm ** 2, axis=1, keepdims=True)
+        C_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
+        XC = X_norm @ centers.T
+        dist_sq = X_sq - 2 * XC + C_sq
+
+        new_labels = np.argmin(dist_sq, axis=1)
+
+        if np.array_equal(new_labels, labels) and iteration > 0:
+            break
+        labels = new_labels
+
+        # Update: recompute centers
+        for j in range(k):
+            members = X_norm[labels == j]
+            if len(members) == 0:
+                centers[j] = X_norm[rng.randint(N)]
+            else:
+                centers[j] = members.mean(axis=0)
+
+    # Un-normalize centers back to original scale
+    centers_orig = centers * feat_range + feat_min
+    return labels, centers_orig
+
+
+def compute_texture_segment_features(grayscale, edges, roi_mask):
+    """Compute k-Means texture segmentation features.
+
+    Segments the ROI into 3 texture clusters based on local statistics
+    (mean, variance, edge density), then reports the proportion of
+    pixels in the smoothest and edgiest clusters.
+
+    Args:
+        grayscale: 2D float64 image
+        edges: 2D binary edge map (0 or 255)
+        roi_mask: 2D binary ROI mask
+
+    Returns:
+        dict with texture_smooth_ratio and texture_edgy_ratio
+    """
+    roi_area = np.sum(roi_mask)
+    if roi_area < 500:
+        return {'texture_smooth_ratio': 0.33, 'texture_edgy_ratio': 0.33}
+
+    # Step 1: Compute per-pixel local texture features
+    feature_vectors, _ = compute_local_texture_stats(
+        grayscale, edges, roi_mask, patch_size=7)
+
+    N = len(feature_vectors)
+    if N < 10:
+        return {'texture_smooth_ratio': 0.33, 'texture_edgy_ratio': 0.33}
+
+    # Step 2: Run k-Means (subsample if very large)
+    max_points = 200000
+    if N > max_points:
+        rng = np.random.RandomState(42)
+        sample_idx = rng.choice(N, max_points, replace=False)
+        X_sample = feature_vectors[sample_idx]
+    else:
+        X_sample = feature_vectors
+        sample_idx = None
+
+    labels_sample, centers = kmeans_cluster(X_sample, k=3, max_iter=20, seed=42)
+
+    # Step 3: Assign all pixels if we subsampled
+    if sample_idx is not None:
+        feat_min = X_sample.min(axis=0)
+        feat_range = X_sample.max(axis=0) - feat_min
+        feat_range[feat_range < 1e-10] = 1.0
+        X_all_norm = (feature_vectors - feat_min) / feat_range
+        centers_norm = (centers - feat_min) / feat_range
+        dists = np.sum(
+            (X_all_norm[:, None, :] - centers_norm[None, :, :]) ** 2, axis=2)
+        labels = np.argmin(dists, axis=1)
+    else:
+        labels = labels_sample
+
+    # Step 4: Sort clusters by local edge density (column 2)
+    sort_order = np.argsort(centers[:, 2])  # ascending: smooth first
+    remap = np.zeros(3, dtype=np.intp)
+    for new_idx, old_idx in enumerate(sort_order):
+        remap[old_idx] = new_idx
+    sorted_labels = remap[labels]
+
+    # Step 5: Compute proportions
+    total = len(sorted_labels)
+    smooth_ratio = np.sum(sorted_labels == 0) / total
+    edgy_ratio = np.sum(sorted_labels == 2) / total
+
+    return {
+        'texture_smooth_ratio': float(smooth_ratio),
+        'texture_edgy_ratio': float(edgy_ratio),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
@@ -718,6 +936,7 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
     line_uniformity = compute_line_spacing_uniformity(
         grayscale, magnitude, direction, roi_mask)
     hough_feats = compute_hough_features(edges, magnitude, direction, roi_mask)
+    texture_feats = compute_texture_segment_features(grayscale, edges, roi_mask)
 
     return {
         'fill_density': fill_density,
@@ -736,6 +955,8 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
         'hough_line_count': hough_feats['hough_line_count'],
         'hough_spacing_regularity': hough_feats['hough_spacing_regularity'],
         'hough_peak_ratio': hough_feats['hough_peak_ratio'],
+        'texture_smooth_ratio': texture_feats['texture_smooth_ratio'],
+        'texture_edgy_ratio': texture_feats['texture_edgy_ratio'],
     }
 
 
