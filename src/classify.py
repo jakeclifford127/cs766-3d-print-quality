@@ -2,20 +2,8 @@ import numpy as np
 from scipy.fft import fft2, fftshift
 
 
-# ---------------------------------------------------------------------------
-# Fill Density Metric
-# ---------------------------------------------------------------------------
-
 def compute_fill_density(edges, roi_mask):
-    """Compute the ratio of edge pixels to total ROI area.
-
-    Args:
-        edges: 2D binary edge map (0 or 255) from Canny
-        roi_mask: 2D binary mask (0 or 1) defining the print region
-
-    Returns:
-        fill_density: float ratio (edge pixels inside ROI / total ROI pixels)
-    """
+    """edge/ROI ratio."""
     roi_area = np.sum(roi_mask)
     if roi_area == 0:
         return 0.0
@@ -26,38 +14,17 @@ def compute_fill_density(edges, roi_mask):
     return edge_in_roi / roi_area
 
 
-# ---------------------------------------------------------------------------
-# Gradient Direction Analysis
-# ---------------------------------------------------------------------------
-
 def compute_gradient_histogram(magnitude, direction, roi_mask, num_bins=36):
-    """Compute histogram of gradient directions within the ROI.
-
-    Under-extruded layers tend to have strong edges perpendicular to
-    extrusion direction (gaps between lines). Over-extruded layers show
-    edges parallel to extrusion with compressed spacing.
-
-    Args:
-        magnitude: 2D gradient magnitude array
-        direction: 2D gradient direction array (radians)
-        roi_mask: 2D binary ROI mask
-        num_bins: number of angle bins (default 36 = 10 degrees each)
-
-    Returns:
-        hist: 1D array of weighted gradient direction counts
-        bin_edges: angle bin edges in degrees
-    """
-    # Only consider pixels inside the ROI with significant gradient
+    """Weighted gradient direction histogram."""
     valid = (roi_mask > 0) & (magnitude > np.percentile(magnitude[roi_mask > 0], 25))
 
-    angles_deg = np.degrees(direction[valid]) % 180  # map to 0-180 range
+    angles_deg = np.degrees(direction[valid]) % 180
     weights = magnitude[valid]
 
     hist, bin_edges = np.histogram(
         angles_deg, bins=num_bins, range=(0, 180), weights=weights
     )
 
-    # Normalize
     if hist.sum() > 0:
         hist = hist / hist.sum()
 
@@ -65,22 +32,9 @@ def compute_gradient_histogram(magnitude, direction, roi_mask, num_bins=36):
 
 
 def gradient_direction_entropy(magnitude, direction, roi_mask):
-    """Compute entropy of gradient directions as a uniformity measure.
-
-    High entropy = edges in all directions (more uniform / well-fused).
-    Low entropy = edges concentrated in few directions (line gaps or ridges).
-
-    Args:
-        magnitude: 2D gradient magnitude
-        direction: 2D gradient direction (radians)
-        roi_mask: 2D binary ROI mask
-
-    Returns:
-        entropy: float, Shannon entropy of the gradient direction histogram
-    """
+    """Shannon entropy of gradient dirs."""
     hist, _ = compute_gradient_histogram(magnitude, direction, roi_mask)
 
-    # Shannon entropy (ignore zero bins)
     hist_nonzero = hist[hist > 0]
     entropy = -np.sum(hist_nonzero * np.log2(hist_nonzero))
 
@@ -88,15 +42,7 @@ def gradient_direction_entropy(magnitude, direction, roi_mask):
 
 
 def gradient_magnitude_stats(magnitude, roi_mask):
-    """Compute statistics of gradient magnitudes within the ROI.
-
-    Args:
-        magnitude: 2D gradient magnitude
-        roi_mask: 2D binary ROI mask
-
-    Returns:
-        dict with mean, std, median, and high_gradient_ratio
-    """
+    """Mean/std/median of gradient mags."""
     vals = magnitude[roi_mask > 0]
     if len(vals) == 0:
         return {'mean': 0, 'std': 0, 'median': 0, 'high_gradient_ratio': 0}
@@ -111,44 +57,15 @@ def gradient_magnitude_stats(magnitude, roi_mask):
 
 
 def gradient_direction_kurtosis(magnitude, direction, roi_mask):
-    """Compute kurtosis of the gradient direction histogram.
-
-    Over-extruded layers tend to have more uniform gradient directions
-    (lower kurtosis) while under-extruded layers show sharper directional
-    peaks from line gaps (higher kurtosis).
-
-    Args:
-        magnitude: 2D gradient magnitude
-        direction: 2D gradient direction (radians)
-        roi_mask: 2D binary ROI mask
-
-    Returns:
-        kurtosis: float, excess kurtosis of the direction histogram
-    """
+    """Kurtosis of direction histogram."""
     hist, _ = compute_gradient_histogram(magnitude, direction, roi_mask)
     mean = np.mean(hist)
     std = np.std(hist) + 1e-8
     return float(np.mean(((hist - mean) / std) ** 4))
 
 
-# ---------------------------------------------------------------------------
-# Edge Spatial Analysis
-# ---------------------------------------------------------------------------
-
 def compute_edge_density_cv(edges, roi_mask, num_patches=8):
-    """Compute coefficient of variation of edge density across patches.
-
-    Measures texture regularity: well-extruded layers have uniform edge
-    density, while defects create uneven patches of high/low density.
-
-    Args:
-        edges: 2D binary edge map (0 or 255)
-        roi_mask: 2D binary ROI mask
-        num_patches: number of patches along each axis
-
-    Returns:
-        cv: float, coefficient of variation (std/mean) of patch densities
-    """
+    """CV of edge density across patches."""
     edge_in_roi = ((edges > 0).astype(np.uint8)) * roi_mask
     h, w = edges.shape
     patch_size = max(h, w) // num_patches
@@ -171,20 +88,7 @@ def compute_edge_density_cv(edges, roi_mask, num_patches=8):
 
 
 def compute_edge_to_gradient_ratio(edges, magnitude, roi_mask):
-    """Compute ratio of edge pixels to high-gradient pixels inside ROI.
-
-    Over-extruded layers tend to have a higher fraction of strong
-    gradients that survive as edges, while under-extruded layers have
-    weaker, more fragmented edges relative to their gradient field.
-
-    Args:
-        edges: 2D binary edge map (0 or 255)
-        magnitude: 2D gradient magnitude
-        roi_mask: 2D binary ROI mask
-
-    Returns:
-        ratio: float, edge pixels / high-gradient pixels
-    """
+    """Edge px / high-gradient px."""
     edge_in_roi = ((edges > 0).astype(np.uint8)) * roi_mask
     total_edge = np.sum(edge_in_roi)
 
@@ -197,45 +101,19 @@ def compute_edge_to_gradient_ratio(edges, magnitude, roi_mask):
 
 
 def compute_roi_coverage(roi_mask):
-    """Compute fraction of image covered by the ROI.
-
-    Args:
-        roi_mask: 2D binary ROI mask
-
-    Returns:
-        coverage: float in [0, 1]
-    """
+    """ROI fraction of image."""
     return float(np.sum(roi_mask) / roi_mask.size)
 
 
-# ---------------------------------------------------------------------------
-# Fourier-Domain Analysis
-# ---------------------------------------------------------------------------
-
 def compute_frequency_profile(grayscale, roi_mask):
-    """Analyze spatial frequencies of extrusion lines using FFT.
-
-    Regular line spacing produces strong peaks in the frequency domain.
-    Missing or irregular spacing indicates defects.
-
-    Args:
-        grayscale: 2D grayscale image (float64)
-        roi_mask: 2D binary ROI mask
-
-    Returns:
-        radial_profile: 1D array of radially-averaged power spectrum
-        dominant_frequency: the frequency with highest power (excluding DC)
-        spectral_energy_ratio: energy in dominant band vs total energy
-    """
-    # Apply mask (zero out background)
+    """FFT radial profile + dominant freq."""
     masked = grayscale * roi_mask
 
-    # 2D FFT
     f_transform = fft2(masked)
     f_shifted = fftshift(f_transform)
     power_spectrum = np.abs(f_shifted) ** 2
 
-    # Radial average of power spectrum
+    # radial average
     h, w = power_spectrum.shape
     cy, cx = h // 2, w // 2
     y, x = np.ogrid[:h, :w]
@@ -248,13 +126,12 @@ def compute_frequency_profile(grayscale, roi_mask):
         if len(ring) > 0:
             radial_profile[ri] = np.mean(ring)
 
-    # Skip DC component (index 0)
+    # skip DC
     if len(radial_profile) > 1:
         spectrum_no_dc = radial_profile[1:]
         dominant_frequency = np.argmax(spectrum_no_dc) + 1
         total_energy = np.sum(spectrum_no_dc)
         if total_energy > 0:
-            # Energy in a band around the dominant frequency
             band_start = max(0, dominant_frequency - 3)
             band_end = min(len(spectrum_no_dc), dominant_frequency + 3)
             band_energy = np.sum(spectrum_no_dc[band_start:band_end])
@@ -268,33 +145,21 @@ def compute_frequency_profile(grayscale, roi_mask):
     return radial_profile, dominant_frequency, spectral_energy_ratio
 
 
-# ---------------------------------------------------------------------------
-# Line-Spacing Uniformity
-# ---------------------------------------------------------------------------
+# line spacing
 
 def detect_line_direction(magnitude, direction, roi_mask):
-    """Detect the dominant extrusion line direction using gradient histogram.
-
-    The gradient direction is perpendicular to the line direction, so we
-    rotate by 90 degrees to get the actual line orientation.
-
-    Returns:
-        (line_angle_deg, confidence): line angle in degrees [0, 180),
-            confidence is peak-to-mean ratio of the histogram (higher = clearer direction)
-    """
+    """Find dominant extrusion line angle."""
     hist, _ = compute_gradient_histogram(magnitude, direction, roi_mask, num_bins=36)
     if hist is None or np.sum(hist) == 0:
         return 0.0, 0.0
 
-    # Find peak bin
     peak_bin = np.argmax(hist)
     peak_val = hist[peak_bin]
     mean_val = np.mean(hist)
 
-    # Confidence: how much the peak stands out
     confidence = peak_val / mean_val if mean_val > 0 else 0.0
 
-    # Parabolic interpolation for sub-bin precision
+    # parabolic interpolation
     n = len(hist)
     left = hist[(peak_bin - 1) % n]
     right = hist[(peak_bin + 1) % n]
@@ -304,37 +169,23 @@ def detect_line_direction(magnitude, direction, roi_mask):
     else:
         offset = 0.0
 
-    # Gradient angle in degrees (each bin = 180/36 = 5 degrees)
     grad_angle = (peak_bin + offset) * (180.0 / n)
-    # Line direction is perpendicular to gradient direction
+    # perpendicular to gradient = line dir
     line_angle = (grad_angle + 90.0) % 180.0
 
     return line_angle, confidence
 
 
 def sample_perpendicular_profiles(grayscale, roi_mask, line_angle_deg, num_profiles=20):
-    """Sample intensity profiles perpendicular to the extrusion line direction.
-
-    Generates scan lines across the ROI oriented perpendicular to the detected
-    line direction, sampling grayscale intensity along each.
-
-    Returns:
-        list of 1D numpy arrays (intensity profiles), each with >= 20 samples
-    """
+    """Sample intensity across lines."""
     h, w = grayscale.shape
-    # Perpendicular direction (same as gradient direction)
-    perp_rad = np.deg2rad(line_angle_deg)  # line dir; perp to lines = line_dir itself rotated
-    # Actually: line_angle is the line direction. We want to scan PERPENDICULAR to lines.
-    # Perpendicular to the line direction = the gradient direction = line_angle - 90
     scan_rad = np.deg2rad(line_angle_deg - 90.0)
     dx = np.cos(scan_rad)
     dy = np.sin(scan_rad)
 
-    # Line direction for distributing scan line starting positions
     line_dx = np.cos(np.deg2rad(line_angle_deg))
     line_dy = np.sin(np.deg2rad(line_angle_deg))
 
-    # Find ROI bounding box center
     rows, cols = np.where(roi_mask > 0)
     if len(rows) == 0:
         return []
@@ -343,21 +194,17 @@ def sample_perpendicular_profiles(grayscale, roi_mask, line_angle_deg, num_profi
     roi_w = cols.max() - cols.min()
     max_extent = max(roi_h, roi_w)
 
-    # Distribute scan line origins along the line direction
     offsets = np.linspace(-max_extent / 2, max_extent / 2, num_profiles)
     profiles = []
 
     for off in offsets:
-        # Starting point: center + offset along line direction
         start_y = cy + off * line_dy
         start_x = cx + off * line_dx
 
-        # Sample along the scan (perpendicular) direction
         t_range = np.arange(-max_extent, max_extent + 1)
         ys = (start_y + t_range * dy).astype(int)
         xs = (start_x + t_range * dx).astype(int)
 
-        # Keep only valid, in-ROI pixels
         valid = (ys >= 0) & (ys < h) & (xs >= 0) & (xs < w)
         ys, xs = ys[valid], xs[valid]
         in_roi = roi_mask[ys, xs] > 0
@@ -370,15 +217,8 @@ def sample_perpendicular_profiles(grayscale, roi_mask, line_angle_deg, num_profi
 
 
 def find_1d_peaks(profile, min_prominence_ratio=0.1):
-    """Find peaks in a 1D intensity profile.
-
-    Smooths the profile with a small Gaussian, then detects local maxima
-    with sufficient prominence.
-
-    Returns:
-        numpy array of peak indices
-    """
-    # Smooth with 1D Gaussian (sigma=2)
+    """Find peaks in 1D profile."""
+    # smooth w/ gaussian
     sigma = 2.0
     radius = int(3 * sigma)
     x = np.arange(-radius, radius + 1)
@@ -386,7 +226,6 @@ def find_1d_peaks(profile, min_prominence_ratio=0.1):
     kernel = kernel / kernel.sum()
     smoothed = np.convolve(profile, kernel, mode='same')
 
-    # Find local maxima
     peaks = []
     for i in range(1, len(smoothed) - 1):
         if smoothed[i] > smoothed[i - 1] and smoothed[i] > smoothed[i + 1]:
@@ -395,7 +234,6 @@ def find_1d_peaks(profile, min_prominence_ratio=0.1):
     if len(peaks) == 0:
         return np.array([], dtype=int)
 
-    # Filter by prominence
     profile_range = smoothed.max() - smoothed.min()
     if profile_range < 1e-10:
         return np.array([], dtype=int)
@@ -403,7 +241,6 @@ def find_1d_peaks(profile, min_prominence_ratio=0.1):
     min_prominence = min_prominence_ratio * profile_range
     strong_peaks = []
     for p in peaks:
-        # Find nearest valleys on each side
         left_valley = smoothed[p]
         for j in range(p - 1, -1, -1):
             if smoothed[j] < left_valley:
@@ -424,33 +261,19 @@ def find_1d_peaks(profile, min_prominence_ratio=0.1):
 
 
 def compute_line_spacing_uniformity(grayscale, magnitude, direction, roi_mask):
-    """Compute line-spacing uniformity metric.
-
-    Measures how regular the extrusion line spacing is by:
-    1. Detecting the dominant line direction
-    2. Sampling intensity profiles perpendicular to lines
-    3. Finding peaks (line centers) in each profile
-    4. Computing the coefficient of variation of peak spacing
-
-    Returns:
-        float in (0, 1]: 1.0 = perfectly uniform spacing, lower = more irregular.
-        Returns 0.5 (neutral) if insufficient data.
-    """
+    """How regular the line spacing is. Returns 0-1."""
     roi_area = np.sum(roi_mask)
     if roi_area == 0:
         return 0.5
 
-    # Step 1: Detect line direction
     line_angle, confidence = detect_line_direction(magnitude, direction, roi_mask)
     if confidence < 1.5:
-        return 0.5  # No clear line direction
+        return 0.5
 
-    # Step 2: Sample perpendicular profiles
     profiles = sample_perpendicular_profiles(grayscale, roi_mask, line_angle)
     if len(profiles) == 0:
         return 0.5
 
-    # Step 3: Find peaks and collect spacings
     all_spacings = []
     for prof in profiles:
         peaks = find_1d_peaks(prof)
@@ -458,9 +281,8 @@ def compute_line_spacing_uniformity(grayscale, magnitude, direction, roi_mask):
             spacings = np.diff(peaks)
             all_spacings.extend(spacings.tolist())
 
-    # Step 4: Compute uniformity
     if len(all_spacings) < 5:
-        return 0.5  # Insufficient data
+        return 0.5
 
     spacings_arr = np.array(all_spacings, dtype=np.float64)
     mean_spacing = np.mean(spacings_arr)
@@ -473,45 +295,24 @@ def compute_line_spacing_uniformity(grayscale, magnitude, direction, roi_mask):
     return float(uniformity)
 
 
-# ---------------------------------------------------------------------------
-# Hough Transform Line Detection
-# ---------------------------------------------------------------------------
+# hough transform
 
 def hough_line_transform(edges, roi_mask, rho_res=1.0, theta_res_deg=1.0):
-    """Compute the Hough Transform accumulator for line detection.
-
-    Parameterizes lines as rho = x*cos(theta) + y*sin(theta) and
-    accumulates votes from edge pixels inside the ROI.
-
-    Args:
-        edges: 2D binary edge map (0 or 255) from Canny
-        roi_mask: 2D binary ROI mask
-        rho_res: rho bin resolution in pixels
-        theta_res_deg: theta bin resolution in degrees
-
-    Returns:
-        accumulator: 2D vote array (num_rho_bins, num_theta_bins)
-        rho_values: 1D array mapping row index to rho in pixels
-        theta_values: 1D array of theta values in radians
-    """
+    """Hough accumulator for lines."""
     h, w = edges.shape
     diag = int(np.ceil(np.sqrt(h**2 + w**2)))
 
-    # Theta bins: 0 to 180 degrees
     thetas = np.deg2rad(np.arange(0, 180, theta_res_deg))
     cos_thetas = np.cos(thetas)
     sin_thetas = np.sin(thetas)
 
-    # Rho bins: -diag to +diag
     num_rhos = int(2 * diag / rho_res) + 1
     rho_values = np.linspace(-diag, diag, num_rhos)
 
-    # Find edge pixels inside ROI
     ys, xs = np.where((edges > 0) & (roi_mask > 0))
     if len(ys) == 0:
         return np.zeros((num_rhos, len(thetas)), dtype=np.int32), rho_values, thetas
 
-    # Vectorized voting: iterate over theta, vectorize over pixels
     accumulator = np.zeros((num_rhos, len(thetas)), dtype=np.int32)
     xs_f = xs.astype(np.float64)
     ys_f = ys.astype(np.float64)
@@ -519,7 +320,6 @@ def hough_line_transform(edges, roi_mask, rho_res=1.0, theta_res_deg=1.0):
     for t_idx in range(len(thetas)):
         rhos = xs_f * cos_thetas[t_idx] + ys_f * sin_thetas[t_idx]
         rho_idx = np.round((rhos + diag) / rho_res).astype(np.intp)
-        # Clip to valid range
         valid = (rho_idx >= 0) & (rho_idx < num_rhos)
         np.add.at(accumulator, (rho_idx[valid], t_idx), 1)
 
@@ -529,43 +329,26 @@ def hough_line_transform(edges, roi_mask, rho_res=1.0, theta_res_deg=1.0):
 def extract_hough_peaks(accumulator, rho_values, theta_values,
                         threshold_ratio=0.15, nms_rho_dist=10,
                         nms_theta_dist=10, max_peaks=50):
-    """Extract line peaks from Hough accumulator with non-maximum suppression.
-
-    Args:
-        accumulator: 2D vote array from hough_line_transform
-        rho_values: 1D array of rho values
-        theta_values: 1D array of theta values in radians
-        threshold_ratio: minimum vote count as fraction of max
-        nms_rho_dist: minimum rho separation between peaks (bins)
-        nms_theta_dist: minimum theta separation between peaks (bins)
-        max_peaks: maximum number of peaks to return
-
-    Returns:
-        list of (rho, theta_rad, votes) tuples, sorted by votes descending
-    """
+    """Extract peaks with NMS."""
     if accumulator.max() == 0:
         return []
 
     threshold = threshold_ratio * accumulator.max()
 
-    # Find all cells above threshold
     candidates = []
     above = np.where(accumulator >= threshold)
     for ri, ti in zip(above[0], above[1]):
         candidates.append((ri, ti, accumulator[ri, ti]))
 
-    # Sort by votes descending
     candidates.sort(key=lambda x: x[2], reverse=True)
 
-    # Greedy NMS
+    # greedy NMS
     accepted = []
     for ri, ti, votes in candidates:
         if len(accepted) >= max_peaks:
             break
-        # Check if too close to any accepted peak
         too_close = False
         for ari, ati, _ in accepted:
-            # Circular theta distance
             dt = abs(ti - ati)
             dt = min(dt, len(theta_values) - dt)
             if abs(ri - ari) <= nms_rho_dist and dt <= nms_theta_dist:
@@ -574,7 +357,6 @@ def extract_hough_peaks(accumulator, rho_values, theta_values,
         if not too_close:
             accepted.append((ri, ti, votes))
 
-    # Convert to (rho, theta, votes)
     peaks = []
     for ri, ti, votes in accepted:
         peaks.append((rho_values[ri], theta_values[ti], int(votes)))
@@ -583,29 +365,13 @@ def extract_hough_peaks(accumulator, rho_values, theta_values,
 
 
 def compute_hough_features(edges, magnitude, direction, roi_mask):
-    """Compute Hough Transform-based line detection features.
-
-    Detects lines in the edge map using the Hough Transform, then
-    computes 3 scalar features measuring line count, spacing regularity,
-    and pattern strength.
-
-    Args:
-        edges: 2D binary edge map (0 or 255)
-        magnitude: gradient magnitude from Sobel
-        direction: gradient direction from Sobel (radians)
-        roi_mask: 2D binary ROI mask
-
-    Returns:
-        dict with keys: hough_line_count, hough_spacing_regularity,
-                        hough_peak_ratio
-    """
+    """Line count, spacing, peak ratio from hough."""
     neutral = {
         'hough_line_count': 0.0,
         'hough_spacing_regularity': 0.5,
         'hough_peak_ratio': 0.0,
     }
 
-    # Check for sufficient edge pixels
     roi_area = np.sum(roi_mask)
     if roi_area < 100:
         return neutral
@@ -614,44 +380,36 @@ def compute_hough_features(edges, magnitude, direction, roi_mask):
     if edge_count < 10:
         return neutral
 
-    # Run Hough Transform
     accumulator, rho_values, theta_values = hough_line_transform(edges, roi_mask)
 
     if accumulator.max() == 0:
         return neutral
 
-    # Extract peaks
     peaks = extract_hough_peaks(accumulator, rho_values, theta_values)
     if len(peaks) == 0:
         return neutral
 
-    # Get dominant extrusion direction from existing function
     line_angle, dir_confidence = detect_line_direction(magnitude, direction, roi_mask)
-    # Convert line angle to Hough theta (perpendicular to line direction)
     dominant_theta_rad = np.deg2rad(line_angle - 90.0) % np.pi
 
-    # --- Feature 1: hough_line_count ---
-    # Count lines within ±15 degrees of dominant direction
+    # count parallel lines
     parallel_tolerance = np.deg2rad(15.0)
     parallel_peaks = []
     for rho, theta, votes in peaks:
-        # Circular angular distance
         dt = abs(theta - dominant_theta_rad)
         dt = min(dt, np.pi - dt)
         if dt <= parallel_tolerance:
             parallel_peaks.append((rho, theta, votes))
 
-    # Normalize by ROI scale
     h, w = edges.shape
     roi_diag = np.sqrt(h**2 + w**2)
     hough_line_count = len(parallel_peaks) / (roi_diag / 100.0)
 
-    # --- Feature 2: hough_spacing_regularity ---
+    # spacing regularity
     if len(parallel_peaks) >= 3:
-        # Sort parallel lines by rho and compute consecutive spacings
         sorted_rhos = sorted([p[0] for p in parallel_peaks])
         spacings = np.diff(sorted_rhos)
-        spacings = spacings[spacings > 0]  # remove duplicates
+        spacings = spacings[spacings > 0]
 
         if len(spacings) >= 2:
             mean_sp = np.mean(spacings)
@@ -665,15 +423,13 @@ def compute_hough_features(edges, magnitude, direction, roi_mask):
     else:
         hough_spacing_regularity = 0.5
 
-    # --- Feature 3: hough_peak_ratio ---
-    # Sum accumulator votes per theta to get a 1D theta profile
+    # peak ratio
     theta_profile = accumulator.sum(axis=0).astype(np.float64)
     total_energy = theta_profile.sum()
 
     if total_energy > 0:
-        # Find peak theta and sum energy in ±5 degree window
         peak_theta_idx = np.argmax(theta_profile)
-        window = 5  # degrees (since theta_res = 1 degree)
+        window = 5
         n_thetas = len(theta_values)
         peak_energy = 0.0
         for di in range(-window, window + 1):
@@ -690,40 +446,17 @@ def compute_hough_features(edges, magnitude, direction, roi_mask):
     }
 
 
-# ---------------------------------------------------------------------------
-# k-Means Texture Segmentation
-# ---------------------------------------------------------------------------
+# k-means texture segmentation
 
 def compute_local_texture_stats(grayscale, edges, roi_mask, patch_size=7):
-    """Compute per-pixel local texture features using integral images.
-
-    For each pixel in the ROI, computes a 3-element feature vector from
-    its local neighborhood: [local_mean, local_variance, local_edge_density].
-
-    Uses integral images (summed area tables) for O(1) per-pixel computation
-    regardless of patch size.
-
-    Args:
-        grayscale: 2D float64 image
-        edges: 2D binary edge map (0 or 255)
-        roi_mask: 2D binary ROI mask
-        patch_size: odd int, neighborhood size (default 7)
-
-    Returns:
-        feature_vectors: float64 [N, 3] — local features for N ROI pixels
-        roi_indices: tuple (rows, cols) of ROI pixel coordinates
-    """
+    """Per-pixel texture features via integral images."""
     half = patch_size // 2
     H, W = grayscale.shape
 
-    # Pad images for boundary handling
     gray_pad = np.pad(grayscale, half, mode='reflect')
     edge_binary = (edges > 0).astype(np.float64)
     edge_pad = np.pad(edge_binary, half, mode='constant', constant_values=0)
 
-    # Integral images with zero-prepended row/col for clean indexing
-    # After padding, shape is (H + 2*half, W + 2*half)
-    # Prepend zeros: shape becomes (H + 2*half + 1, W + 2*half + 1)
     def make_integral(img):
         sat = np.zeros((img.shape[0] + 1, img.shape[1] + 1), dtype=np.float64)
         np.cumsum(img, axis=0, out=sat[1:, 1:])
@@ -734,17 +467,9 @@ def compute_local_texture_stats(grayscale, edges, roi_mask, patch_size=7):
     integral_sq = make_integral(gray_pad ** 2)
     integral_edge = make_integral(edge_pad)
 
-    # Box sum for patch centered at original pixel (i, j):
-    # In padded image, (i, j) maps to (i+half, j+half)
-    # Patch top-left in padded = (i, j), bottom-right = (i + ps - 1, j + ps - 1)
-    # SAT sum = I[r2+1, c2+1] - I[r1, c2+1] - I[r2+1, c1] + I[r1, c1]
-    # r1 = i, c1 = j, r2 = i + ps - 1
     ps = patch_size
     count = ps * ps
 
-    # For all original pixels [0..H-1, 0..W-1]:
-    # r1 = 0..H-1, c1 = 0..W-1  (top-left of patch in padded coords)
-    # r2+1 = ps..H+ps-1+1 = ps..H+ps
     local_sum = (integral[ps:H+ps, ps:W+ps]
                  - integral[:H, ps:W+ps]
                  - integral[ps:H+ps, :W]
@@ -764,7 +489,6 @@ def compute_local_texture_stats(grayscale, edges, roi_mask, patch_size=7):
     local_var = np.maximum((local_sum_sq / count) - (local_mean ** 2), 0.0)
     local_edge_density = local_edge_sum / count
 
-    # Extract only ROI pixels
     roi_rows, roi_cols = np.where(roi_mask > 0)
     feature_vectors = np.column_stack([
         local_mean[roi_rows, roi_cols],
@@ -776,28 +500,17 @@ def compute_local_texture_stats(grayscale, edges, roi_mask, patch_size=7):
 
 
 def kmeans_cluster(X, k=3, max_iter=20, seed=42):
-    """From-scratch k-Means clustering with k-Means++ initialization.
-
-    Args:
-        X: float64 [N, D] — feature matrix
-        k: number of clusters
-        max_iter: maximum iterations
-        seed: random seed for reproducibility
-
-    Returns:
-        labels: int [N] — cluster assignments (0 to k-1)
-        centers: float64 [k, D] — cluster centers in original scale
-    """
+    """k-means with k-means++ init."""
     N, D = X.shape
     rng = np.random.RandomState(seed)
 
-    # Feature normalization to [0, 1]
+    # normalize
     feat_min = X.min(axis=0)
     feat_range = X.max(axis=0) - feat_min
     feat_range[feat_range < 1e-10] = 1.0
     X_norm = (X - feat_min) / feat_range
 
-    # k-Means++ initialization
+    # kmeans++ init
     centers = np.empty((k, D), dtype=np.float64)
     centers[0] = X_norm[rng.randint(N)]
 
@@ -810,10 +523,8 @@ def kmeans_cluster(X, k=3, max_iter=20, seed=42):
         idx = min(np.searchsorted(cumulative, rng.rand()), N - 1)
         centers[c] = X_norm[idx]
 
-    # Main loop
     labels = np.zeros(N, dtype=np.intp)
     for iteration in range(max_iter):
-        # Assignment: squared Euclidean distance to each center
         X_sq = np.sum(X_norm ** 2, axis=1, keepdims=True)
         C_sq = np.sum(centers ** 2, axis=1, keepdims=True).T
         XC = X_norm @ centers.T
@@ -825,7 +536,6 @@ def kmeans_cluster(X, k=3, max_iter=20, seed=42):
             break
         labels = new_labels
 
-        # Update: recompute centers
         for j in range(k):
             members = X_norm[labels == j]
             if len(members) == 0:
@@ -833,31 +543,17 @@ def kmeans_cluster(X, k=3, max_iter=20, seed=42):
             else:
                 centers[j] = members.mean(axis=0)
 
-    # Un-normalize centers back to original scale
+    # un-normalize centers
     centers_orig = centers * feat_range + feat_min
     return labels, centers_orig
 
 
 def compute_texture_segment_features(grayscale, edges, roi_mask):
-    """Compute k-Means texture segmentation features.
-
-    Segments the ROI into 3 texture clusters based on local statistics
-    (mean, variance, edge density), then reports the proportion of
-    pixels in the smoothest and edgiest clusters.
-
-    Args:
-        grayscale: 2D float64 image
-        edges: 2D binary edge map (0 or 255)
-        roi_mask: 2D binary ROI mask
-
-    Returns:
-        dict with texture_smooth_ratio and texture_edgy_ratio
-    """
+    """Smooth/edgy ratios from k-means texture segmentation."""
     roi_area = np.sum(roi_mask)
     if roi_area < 500:
         return {'texture_smooth_ratio': 0.33, 'texture_edgy_ratio': 0.33}
 
-    # Step 1: Compute per-pixel local texture features
     feature_vectors, _ = compute_local_texture_stats(
         grayscale, edges, roi_mask, patch_size=7)
 
@@ -865,7 +561,7 @@ def compute_texture_segment_features(grayscale, edges, roi_mask):
     if N < 10:
         return {'texture_smooth_ratio': 0.33, 'texture_edgy_ratio': 0.33}
 
-    # Step 2: Run k-Means (subsample if very large)
+    # subsample if huge
     max_points = 200000
     if N > max_points:
         rng = np.random.RandomState(42)
@@ -877,7 +573,6 @@ def compute_texture_segment_features(grayscale, edges, roi_mask):
 
     labels_sample, centers = kmeans_cluster(X_sample, k=3, max_iter=20, seed=42)
 
-    # Step 3: Assign all pixels if we subsampled
     if sample_idx is not None:
         feat_min = X_sample.min(axis=0)
         feat_range = X_sample.max(axis=0) - feat_min
@@ -890,14 +585,13 @@ def compute_texture_segment_features(grayscale, edges, roi_mask):
     else:
         labels = labels_sample
 
-    # Step 4: Sort clusters by local edge density (column 2)
-    sort_order = np.argsort(centers[:, 2])  # ascending: smooth first
+    # sort by edge density
+    sort_order = np.argsort(centers[:, 2])
     remap = np.zeros(3, dtype=np.intp)
     for new_idx, old_idx in enumerate(sort_order):
         remap[old_idx] = new_idx
     sorted_labels = remap[labels]
 
-    # Step 5: Compute proportions
     total = len(sorted_labels)
     smooth_ratio = np.sum(sorted_labels == 0) / total
     edgy_ratio = np.sum(sorted_labels == 2) / total
@@ -908,23 +602,10 @@ def compute_texture_segment_features(grayscale, edges, roi_mask):
     }
 
 
-# ---------------------------------------------------------------------------
-# Classification
-# ---------------------------------------------------------------------------
+# feature extraction + classification
 
 def extract_features(grayscale, edges, magnitude, direction, roi_mask):
-    """Extract all features for classification.
-
-    Args:
-        grayscale: 2D grayscale image
-        edges: binary edge map from Canny
-        magnitude: gradient magnitude from Sobel
-        direction: gradient direction from Sobel
-        roi_mask: binary ROI mask
-
-    Returns:
-        dict of all feature values
-    """
+    """Extract all features for classification."""
     fill_density = compute_fill_density(edges, roi_mask)
     grad_entropy = gradient_direction_entropy(magnitude, direction, roi_mask)
     grad_stats = gradient_magnitude_stats(magnitude, roi_mask)
@@ -961,27 +642,9 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
 
 
 def classify_layer(features, class_centroids=None, shared_inv_cov=None):
-    """Classify a first layer based on extracted features.
+    """LDA mahalanobis classifier.
 
-    Uses LDA-style Mahalanobis distance with a shared (pooled) within-class
-    covariance matrix.  This is more robust to distribution shift than
-    per-class covariances, which can overfit when training data is limited.
-
-    Feature vector (8 features chosen for cross-dataset generalization):
-        [fill_density, gradient_entropy, gradient_dir_kurtosis,
-         edge_to_gradient_ratio, spectral_energy_ratio,
-         edge_density_cv, roi_coverage, line_spacing_uniformity]
-
-    Args:
-        features: dict from extract_features()
-        class_centroids: dict mapping label -> mean_vector,
-                         or None for defaults trained on data+data2
-        shared_inv_cov: shared inverse covariance matrix,
-                        or None for default
-
-    Returns:
-        label: string — 'optimal', 'under_extruded', or 'over_extruded'
-        confidence: float 0-1
+    Uses pooled within-class covariance for robustness.
     """
     feat_keys = [
         'fill_density', 'gradient_entropy', 'gradient_dir_kurtosis',
@@ -990,7 +653,6 @@ def classify_layer(features, class_centroids=None, shared_inv_cov=None):
     ]
 
     if class_centroids is None:
-        # Per-class centroids computed from labeled data with auto-masking
         class_centroids = {
             'optimal': np.array([
                 0.0409, 4.5164, 8.9199, 0.1634, 0.9406, 0.8548,
@@ -1004,8 +666,7 @@ def classify_layer(features, class_centroids=None, shared_inv_cov=None):
         }
 
     if shared_inv_cov is None:
-        # Pooled within-class inverse covariance (LDA-style),
-        # computed from labeled data with regularization
+        # pooled within-class inv cov
         shared_inv_cov = np.array([
             [ 9.63480620e+01,  1.58707299e-01,  4.10842189e-02,
              -1.46050075e+01,  4.16966067e-01,  2.47085427e+00,
@@ -1033,21 +694,16 @@ def classify_layer(features, class_centroids=None, shared_inv_cov=None):
               4.66282462e+00,  6.78464958e+01],
         ])
 
-    # Build sample vector
     sample = np.array([features[k] for k in feat_keys])
 
-    # Mahalanobis distance to each class centroid (no class weights —
-    # removed to avoid bias that hurt generalization on new data)
     distances = {}
     for label, mean_vec in class_centroids.items():
         diff = sample - mean_vec
         distances[label] = np.sqrt(np.dot(diff, np.dot(shared_inv_cov, diff)))
 
-    # Pick the nearest class
     best_label = min(distances, key=distances.get)
     best_dist = distances[best_label]
 
-    # Confidence: inverse of Mahalanobis distance
     confidence = np.exp(-best_dist / 5.0)
 
     return best_label, float(confidence)

@@ -1,3 +1,7 @@
 models/
 .DS_Store
 __pycache__/
+Slides/
+course website.rtfd/
+course_topics.txt
+extract_slides_text.py

@@ -1,33 +1,15 @@
 import numpy as np
 
 
-# ---------------------------------------------------------------------------
-# Color Space Conversion
-# ---------------------------------------------------------------------------
-
 def rgb_to_grayscale(image):
-    """Convert RGB image to grayscale using luminance weights.
-
-    Args:
-        image: 3D numpy array (H, W, 3), uint8 or float
-
-    Returns:
-        2D numpy array (H, W), float64
-    """
+    """Luminance-weighted grayscale."""
     return (0.2989 * image[:, :, 0] +
             0.5870 * image[:, :, 1] +
             0.1140 * image[:, :, 2]).astype(np.float64)
 
 
 def rgb_to_hsv(image):
-    """Convert RGB image to HSV color space.
-
-    Args:
-        image: 3D numpy array (H, W, 3), values 0-255
-
-    Returns:
-        3D numpy array (H, W, 3) with H in [0,360], S in [0,1], V in [0,1]
-    """
+    """RGB to HSV, H in [0,360]."""
     img = image.astype(np.float64) / 255.0
     r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
 
@@ -35,7 +17,7 @@ def rgb_to_hsv(image):
     cmin = np.min(img, axis=2)
     diff = cmax - cmin
 
-    # Hue
+    # hue
     h = np.zeros_like(cmax)
     mask_r = (cmax == r) & (diff > 0)
     mask_g = (cmax == g) & (diff > 0)
@@ -44,35 +26,17 @@ def rgb_to_hsv(image):
     h[mask_g] = 60 * (((b[mask_g] - r[mask_g]) / diff[mask_g]) + 2)
     h[mask_b] = 60 * (((r[mask_b] - g[mask_b]) / diff[mask_b]) + 4)
 
-    # Saturation
+    # saturation
     s = np.zeros_like(cmax)
     s[cmax > 0] = diff[cmax > 0] / cmax[cmax > 0]
 
-    # Value
     v = cmax
 
     return np.stack([h, s, v], axis=2)
 
 
-# ---------------------------------------------------------------------------
-# Background Subtraction via Color Thresholding
-# ---------------------------------------------------------------------------
-
 def threshold_background(hsv_image, h_range=None, s_range=(0.0, 0.3), v_range=(0.0, 0.5)):
-    """Create a binary mask separating the print from the build plate.
-
-    Default ranges target dark/neutral build plates (black, dark gray).
-    Pixels OUTSIDE these ranges are considered foreground (the print).
-
-    Args:
-        hsv_image: 3D array (H, W, 3) in HSV space
-        h_range: tuple (min, max) for hue, or None to ignore hue
-        s_range: tuple (min, max) for saturation
-        v_range: tuple (min, max) for value/brightness
-
-    Returns:
-        Binary mask: 1 = foreground (print), 0 = background (bed)
-    """
+    """Separate print from bed via HSV thresholds."""
     h, s, v = hsv_image[:, :, 0], hsv_image[:, :, 1], hsv_image[:, :, 2]
 
     bg_mask = np.ones(h.shape, dtype=bool)
@@ -82,30 +46,15 @@ def threshold_background(hsv_image, h_range=None, s_range=(0.0, 0.3), v_range=(0
     bg_mask &= (s >= s_range[0]) & (s <= s_range[1])
     bg_mask &= (v >= v_range[0]) & (v <= v_range[1])
 
-    # Foreground is the inverse of background
     return (~bg_mask).astype(np.uint8)
 
 
 def otsu_threshold(grayscale):
-    """Otsu's method — automatically find the optimal global threshold.
-
-    Exhaustively searches all possible thresholds (0-255) and picks
-    the one that minimizes intra-class variance (equivalently, maximizes
-    inter-class variance).  This is the standard formulation from
-    Nobuyuki Otsu's 1979 paper.
-
-    Args:
-        grayscale: 2D numpy array (float64, values 0-255)
-
-    Returns:
-        mask: binary mask (0 or 1), where 1 = foreground (brighter class)
-        threshold: the optimal threshold value
-    """
-    # Quantize to integer bins 0-255
+    """Otsu's method for auto thresholding."""
     pixel_vals = np.clip(grayscale, 0, 255).astype(np.uint8).ravel()
     total_pixels = len(pixel_vals)
 
-    # Compute normalized histogram (256 bins)
+    # histogram
     hist = np.zeros(256, dtype=np.float64)
     for v in pixel_vals:
         hist[v] += 1
@@ -114,11 +63,10 @@ def otsu_threshold(grayscale):
     best_threshold = 0
     best_variance = 0.0
 
-    # Cumulative sums for the background class (0..t)
-    w0 = 0.0   # weight (probability) of background class
-    sum0 = 0.0  # cumulative intensity sum for background
+    w0 = 0.0
+    sum0 = 0.0
 
-    total_mean = np.sum(np.arange(256) * hist)  # global mean intensity
+    total_mean = np.sum(np.arange(256) * hist)
 
     for t in range(256):
         w0 += hist[t]
@@ -132,7 +80,6 @@ def otsu_threshold(grayscale):
         mean0 = sum0 / w0
         mean1 = (total_mean - sum0) / w1
 
-        # Inter-class variance
         variance = w0 * w1 * (mean0 - mean1) ** 2
 
         if variance > best_variance:
@@ -144,55 +91,27 @@ def otsu_threshold(grayscale):
 
 
 def adaptive_threshold(grayscale, block_size=31, c=10):
-    """Simple adaptive thresholding for foreground extraction.
-
-    Each pixel is thresholded against the mean of its local neighborhood.
-
-    Args:
-        grayscale: 2D numpy array (float64, 0-255 range)
-        block_size: size of the local neighborhood (must be odd)
-        c: constant subtracted from local mean
-
-    Returns:
-        Binary mask (0 or 1)
-    """
+    """Local mean adaptive threshold."""
     from convolution import convolve2d_fast
 
-    # Compute local mean using a box filter
     kernel = np.ones((block_size, block_size), dtype=np.float64)
     kernel /= kernel.size
     local_mean = convolve2d_fast(grayscale, kernel, mode='reflect')
 
-    # Pixel is foreground if it's brighter than local mean - c
     mask = (grayscale > (local_mean - c)).astype(np.uint8)
     return mask
 
 
-# ---------------------------------------------------------------------------
-# Morphological Operations (for mask cleanup)
-# ---------------------------------------------------------------------------
+# morphological ops
 
 def dilate(mask, kernel_size=3, iterations=1):
-    """Binary dilation — expand foreground regions.
-
-    Uses sliding-window max via stride tricks instead of Python loops
-    for much better performance on larger images.
-
-    Args:
-        mask: 2D binary array (0/1)
-        kernel_size: size of square structuring element (odd)
-        iterations: number of times to apply dilation
-
-    Returns:
-        Dilated binary mask
-    """
+    """Binary dilation via stride tricks."""
     result = mask.copy().astype(np.uint8)
     pad = kernel_size // 2
 
     for _ in range(iterations):
         padded = np.pad(result, pad, mode='constant', constant_values=0)
         h, w = result.shape
-        # Build windowed view and take max over the kernel
         shape = (h, w, kernel_size, kernel_size)
         strides = padded.strides * 2
         windows = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
@@ -202,26 +121,13 @@ def dilate(mask, kernel_size=3, iterations=1):
 
 
 def erode(mask, kernel_size=3, iterations=1):
-    """Binary erosion — shrink foreground regions.
-
-    Uses sliding-window min via stride tricks instead of Python loops
-    for much better performance on larger images.
-
-    Args:
-        mask: 2D binary array (0/1)
-        kernel_size: size of square structuring element (odd)
-        iterations: number of times to apply erosion
-
-    Returns:
-        Eroded binary mask
-    """
+    """Binary erosion via stride tricks."""
     result = mask.copy().astype(np.uint8)
     pad = kernel_size // 2
 
     for _ in range(iterations):
         padded = np.pad(result, pad, mode='constant', constant_values=1)
         h, w = result.shape
-        # Build windowed view and take min over the kernel
         shape = (h, w, kernel_size, kernel_size)
         strides = padded.strides * 2
         windows = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
@@ -231,33 +137,21 @@ def erode(mask, kernel_size=3, iterations=1):
 
 
 def morph_open(mask, kernel_size=3, iterations=1):
-    """Morphological opening (erode then dilate) — removes small noise."""
+    """Erode then dilate."""
     temp = erode(mask, kernel_size, iterations)
     return dilate(temp, kernel_size, iterations)
 
 
 def morph_close(mask, kernel_size=3, iterations=1):
-    """Morphological closing (dilate then erode) — fills small holes."""
+    """Dilate then erode."""
     temp = dilate(mask, kernel_size, iterations)
     return erode(temp, kernel_size, iterations)
 
 
-# ---------------------------------------------------------------------------
-# Connected Components / Flood Fill
-# ---------------------------------------------------------------------------
+# connected components
 
 def flood_fill(mask, seed_row, seed_col):
-    """Flood fill from a seed point on a binary mask.
-
-    Uses a numpy visited array instead of a Python set for performance.
-
-    Args:
-        mask: 2D binary array (1 = fillable region)
-        seed_row, seed_col: starting coordinates
-
-    Returns:
-        2D binary array with only the connected component containing the seed
-    """
+    """BFS flood fill from seed."""
     from collections import deque
 
     h, w = mask.shape
@@ -285,15 +179,7 @@ def flood_fill(mask, seed_row, seed_col):
 
 
 def connected_components(mask):
-    """Label all connected components in a binary mask.
-
-    Args:
-        mask: 2D binary array (0/1)
-
-    Returns:
-        labels: 2D array where each component has a unique integer label
-        num_components: total number of components found
-    """
+    """Label connected components."""
     h, w = mask.shape
     labels = np.zeros_like(mask, dtype=np.int32)
     current_label = 0
@@ -309,22 +195,12 @@ def connected_components(mask):
 
 
 def largest_component_mask(mask):
-    """Extract only the largest connected component from a binary mask.
-
-    Useful for isolating the main print region and discarding small noise.
-
-    Args:
-        mask: 2D binary array
-
-    Returns:
-        Binary mask containing only the largest component
-    """
+    """Keep only biggest component."""
     labels, num = connected_components(mask)
 
     if num == 0:
         return mask
 
-    # Find label with most pixels
     best_label = 0
     best_count = 0
     for label_id in range(1, num + 1):
@@ -336,28 +212,15 @@ def largest_component_mask(mask):
     return (labels == best_label).astype(np.uint8)
 
 
-# ---------------------------------------------------------------------------
-# Full Masking Pipeline
-# ---------------------------------------------------------------------------
-
 def _mask_quality(mask):
-    """Score a candidate ROI mask on how plausible it looks.
-
-    A good mask should cover a reasonable fraction of the image (not
-    nearly empty, not nearly full) and have a compact largest component.
-
-    Returns:
-        float score in [0, 1] — higher is better
-    """
+    """Score mask plausibility."""
     total = mask.size
     fg_ratio = np.sum(mask) / total
 
-    # Ideal foreground ratio is roughly 10%-70% of the image
     if fg_ratio < 0.03 or fg_ratio > 0.90:
         return 0.0
 
-    # Prefer masks near the middle of the range
-    # Peak score at ~30% foreground, tapering at extremes
+    # peak at ~30% fg
     ratio_score = 1.0 - abs(fg_ratio - 0.35) / 0.55
     ratio_score = max(0.0, ratio_score)
 
@@ -365,41 +228,28 @@ def _mask_quality(mask):
 
 
 def generate_roi_mask(image_rgb, method='auto', cleanup=True):
-    """Generate a Region of Interest mask for the printed area.
+    """Generate ROI mask for print area.
 
-    When method='auto' (default), tries multiple segmentation strategies
-    and picks the one that produces the most plausible mask:
-      1. Otsu's method on grayscale (automatic global threshold)
-      2. HSV color thresholding (original approach, targets dark beds)
-      3. Otsu on the inverted image (handles light prints on light beds)
-
-    Args:
-        image_rgb: 3D numpy array (H, W, 3), uint8, RGB
-        method: 'auto', 'otsu', 'hsv', or 'adaptive'
-        cleanup: if True, apply morphological ops and keep largest component
-
-    Returns:
-        Binary ROI mask (1 = print area, 0 = background)
+    Tries otsu, HSV, and inverted otsu, picks best.
     """
     gray = rgb_to_grayscale(image_rgb)
 
     if method == 'auto':
         candidates = []
 
-        # Candidate 1: Otsu on grayscale
+        # otsu
         otsu_mask, _ = otsu_threshold(gray)
         candidates.append(otsu_mask)
 
-        # Candidate 2: HSV thresholding (original)
+        # hsv
         hsv = rgb_to_hsv(image_rgb)
         hsv_mask = threshold_background(hsv)
         candidates.append(hsv_mask)
 
-        # Candidate 3: Otsu on inverted image (for light-on-light)
+        # inverted otsu
         inv_mask, _ = otsu_threshold(255.0 - gray)
         candidates.append(inv_mask)
 
-        # Clean each candidate and score it
         best_mask = None
         best_score = -1.0
 

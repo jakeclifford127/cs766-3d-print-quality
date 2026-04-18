@@ -1,15 +1,13 @@
-"""Retrain classifier parameters from labeled dataset.
+"""Retrain classifier from labeled data.
 
-Computes class centroids and shared (pooled) inverse covariance matrix
-for the LDA-style Mahalanobis distance classifier. Prints the results
-as copy-pasteable numpy arrays for classify.py.
+Computes centroids + pooled inv cov, prints as
+copy-pasteable arrays for classify.py.
 """
 
 import os
 import sys
 import numpy as np
 
-# Add src to path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from pipeline import load_image
@@ -29,7 +27,7 @@ CLASSES = ['optimal', 'under_extruded', 'over_extruded']
 
 
 def collect_features():
-    """Run pipeline on all labeled images and collect feature vectors."""
+    """Extract features from all labeled images."""
     class_features = {c: [] for c in CLASSES}
 
     for cls in CLASSES:
@@ -58,7 +56,7 @@ def collect_features():
 
 
 def compute_centroids(class_features):
-    """Compute per-class mean vectors."""
+    """Per-class mean vectors."""
     centroids = {}
     for cls in CLASSES:
         vecs = class_features[cls]
@@ -70,7 +68,7 @@ def compute_centroids(class_features):
 
 
 def compute_pooled_inv_cov(class_features, reg=0.01):
-    """Compute pooled within-class inverse covariance (LDA-style)."""
+    """Pooled within-class inverse covariance."""
     n_features = len(FEAT_KEYS)
     S_pooled = np.zeros((n_features, n_features))
     N = 0
@@ -81,22 +79,21 @@ def compute_pooled_inv_cov(class_features, reg=0.01):
         if len(vecs) < 2:
             continue
         n_k = len(vecs)
-        S_k = np.cov(vecs, rowvar=False, bias=False)  # (n_k-1) normalized
+        S_k = np.cov(vecs, rowvar=False, bias=False)
         S_pooled += (n_k - 1) * S_k
         N += n_k
 
     S_pooled /= (N - K)
 
-    # Regularize for numerical stability
+    # regularize
     S_pooled += reg * np.eye(n_features)
 
-    # Invert
     inv_cov = np.linalg.inv(S_pooled)
     return inv_cov
 
 
 def format_array(arr, name, indent=8):
-    """Format a numpy array as a copy-pasteable Python literal."""
+    """Format array as python literal."""
     spaces = ' ' * indent
     if arr.ndim == 1:
         vals = ', '.join(f'{v:.4f}' for v in arr)
@@ -120,7 +117,6 @@ def main():
     print("=" * 60)
     print()
 
-    # Collect features
     print("Collecting features from all images...")
     class_features = collect_features()
 
@@ -128,14 +124,13 @@ def main():
         print(f"  {cls}: {len(class_features[cls])} images")
     print()
 
-    # Compute centroids
     centroids = compute_centroids(class_features)
     print("Per-class centroids:")
     for cls in CLASSES:
         print(f"  {cls}: {centroids[cls]}")
     print()
 
-    # Show per-class feature means for analysis
+    # feature separation
     print("Feature separation analysis:")
     print(f"  {'Feature':<28s} {'Optimal':>10s} {'Under':>10s} {'Over':>10s}")
     print(f"  {'-'*28} {'-'*10} {'-'*10} {'-'*10}")
@@ -144,12 +139,10 @@ def main():
         print(f"  {key:<28s} {vals[0]:>10.4f} {vals[1]:>10.4f} {vals[2]:>10.4f}")
     print()
 
-    # Compute inverse covariance
     inv_cov = compute_pooled_inv_cov(class_features)
     print("Shared inverse covariance matrix computed.")
     print()
 
-    # Print copy-pasteable output
     print("=" * 60)
     print("COPY-PASTE INTO classify_layer():")
     print("=" * 60)
@@ -162,7 +155,7 @@ def main():
     print(f"shared_inv_cov = {format_array(inv_cov, 'shared_inv_cov')}")
     print()
 
-    # Quick accuracy check with new parameters
+    # accuracy check
     print("=" * 60)
     print("ACCURACY CHECK (training set)")
     print("=" * 60)

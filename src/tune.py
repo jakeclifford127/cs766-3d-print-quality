@@ -1,8 +1,4 @@
-"""Systematic parameter tuning via k-fold cross-validation.
-
-Tunes pipeline parameters in sequential groups using stratified 5-fold CV
-to find optimal values without overfitting.
-"""
+"""Parameter tuning with 5-fold CV."""
 
 import os
 import sys
@@ -34,7 +30,7 @@ FEAT_KEYS = [
 
 
 def load_all_images():
-    """Load all images and their labels."""
+    """Load all labeled images."""
     images = []
     labels = []
     names = []
@@ -54,10 +50,10 @@ def extract_features_with_params(image_rgb, sigma=1.0, low_ratio=0.05,
                                   high_ratio=0.15, cleanup_kernel=5,
                                   num_bins=36, num_patches=8,
                                   line_conf_thresh=1.5, peak_prominence=0.1):
-    """Extract features with configurable parameters."""
+    """Feature extraction w/ configurable params."""
     grayscale = rgb_to_grayscale(image_rgb)
 
-    # ROI mask with configurable cleanup kernel
+    # ROI mask
     gray = rgb_to_grayscale(image_rgb)
     candidates = []
     otsu_mask, _ = otsu_threshold(gray)
@@ -81,11 +77,9 @@ def extract_features_with_params(image_rgb, sigma=1.0, low_ratio=0.05,
             best_mask = cleaned
     roi_mask = best_mask
 
-    # Canny edge detection
     edges, magnitude, direction = canny_edge_detection(
         grayscale, sigma=sigma, low_ratio=low_ratio, high_ratio=high_ratio)
 
-    # Feature extraction with configurable params
     fill_density = compute_fill_density(edges, roi_mask)
     grad_entropy = gradient_direction_entropy(magnitude, direction, roi_mask)
     grad_stats = gradient_magnitude_stats(magnitude, roi_mask)
@@ -96,7 +90,7 @@ def extract_features_with_params(image_rgb, sigma=1.0, low_ratio=0.05,
     edge_to_grad = compute_edge_to_gradient_ratio(edges, magnitude, roi_mask)
     roi_cov = compute_roi_coverage(roi_mask)
 
-    # Line spacing with configurable params
+    # line spacing
     roi_area = np.sum(roi_mask)
     if roi_area == 0:
         line_uniformity = 0.5
@@ -139,7 +133,7 @@ def extract_features_with_params(image_rgb, sigma=1.0, low_ratio=0.05,
 
 
 def make_folds(labels, n_folds=5, seed=42):
-    """Create stratified k-fold indices."""
+    """Stratified k-fold split."""
     rng = np.random.RandomState(seed)
     class_indices = {}
     for i, label in enumerate(labels):
@@ -156,8 +150,7 @@ def make_folds(labels, n_folds=5, seed=42):
 
 
 def train_and_test(feature_vecs, labels, train_idx, test_idx, reg=0.01):
-    """Train LDA classifier on train set, test on test set."""
-    # Compute centroids
+    """Train LDA, test on held-out fold."""
     class_vecs = {c: [] for c in CLASSES}
     for i in train_idx:
         class_vecs[labels[i]].append(feature_vecs[i])
@@ -165,10 +158,10 @@ def train_and_test(feature_vecs, labels, train_idx, test_idx, reg=0.01):
     centroids = {}
     for c in CLASSES:
         if len(class_vecs[c]) == 0:
-            return 0.0  # Can't train without all classes
+            return 0.0
         centroids[c] = np.mean(class_vecs[c], axis=0)
 
-    # Pooled covariance
+    # pooled cov
     n_feat = len(FEAT_KEYS)
     S = np.zeros((n_feat, n_feat))
     N = len(train_idx)
@@ -186,7 +179,6 @@ def train_and_test(feature_vecs, labels, train_idx, test_idx, reg=0.01):
     except np.linalg.LinAlgError:
         return 0.0
 
-    # Test
     correct = 0
     for i in test_idx:
         vec = feature_vecs[i]
@@ -201,7 +193,7 @@ def train_and_test(feature_vecs, labels, train_idx, test_idx, reg=0.01):
 
 
 def cv_accuracy(feature_vecs, labels, folds, reg=0.01):
-    """Compute mean cross-validation accuracy."""
+    """Mean cross-validation accuracy."""
     accs = []
     for fold_idx in range(len(folds)):
         test_idx = folds[fold_idx]
@@ -224,7 +216,7 @@ def main():
     print(f"5-fold CV: {[len(f) for f in folds]} images per fold")
     print()
 
-    # ===== BASELINE =====
+    # baseline
     print("=" * 60)
     print("BASELINE (current parameters)")
     print("=" * 60)
@@ -244,11 +236,10 @@ def main():
     print(f"  Baseline CV accuracy: {baseline_cv*100:.1f}%")
     print()
 
-    # Track best params
     best_params = dict(baseline_params)
     best_cv = baseline_cv
 
-    # ===== GROUP 1: Canny parameters =====
+    # group 1: canny params
     print("=" * 60)
     print("GROUP 1: Canny parameters (sigma, low_ratio, high_ratio)")
     print("=" * 60)
@@ -288,7 +279,7 @@ def main():
     print(f"  Group 1 best: {g1_best} -> {g1_best_cv*100:.1f}%")
     print()
 
-    # ===== GROUP 2: Morphological cleanup =====
+    # group 2: morph cleanup
     print("=" * 60)
     print("GROUP 2: Morphological cleanup kernel")
     print("=" * 60)
@@ -311,12 +302,11 @@ def main():
 
     print()
 
-    # ===== GROUP 3: Feature extraction parameters =====
+    # group 3: feature params
     print("=" * 60)
     print("GROUP 3: Feature extraction parameters")
     print("=" * 60)
 
-    # 3a: num_bins
     print("  --- num_bins ---")
     for nb in [12, 18, 24, 36, 48, 72]:
         params = dict(best_params)
@@ -334,7 +324,6 @@ def main():
             best_params['num_bins'] = nb
             best_cv = acc
 
-    # 3b: num_patches
     print("  --- num_patches ---")
     for np_ in [4, 6, 8, 10, 12]:
         params = dict(best_params)
@@ -352,7 +341,6 @@ def main():
             best_params['num_patches'] = np_
             best_cv = acc
 
-    # 3c: line direction confidence threshold
     print("  --- line_conf_thresh ---")
     for lct in [0.5, 1.0, 1.2, 1.5, 2.0, 2.5]:
         params = dict(best_params)
@@ -370,7 +358,6 @@ def main():
             best_params['line_conf_thresh'] = lct
             best_cv = acc
 
-    # 3d: peak prominence ratio
     print("  --- peak_prominence ---")
     for pp in [0.03, 0.05, 0.08, 0.10, 0.15, 0.20]:
         params = dict(best_params)
@@ -390,12 +377,11 @@ def main():
 
     print()
 
-    # ===== GROUP 4: Regularization =====
+    # group 4: regularization
     print("=" * 60)
     print("GROUP 4: Covariance regularization")
     print("=" * 60)
 
-    # Extract features with best params
     final_vecs = []
     for img in images:
         feats = extract_features_with_params(img, **best_params)
@@ -411,7 +397,7 @@ def main():
 
     print()
 
-    # ===== FINAL SUMMARY =====
+    # summary
     print("=" * 60)
     print("FINAL RESULTS")
     print("=" * 60)
@@ -423,7 +409,6 @@ def main():
     for k, v in sorted(best_params.items()):
         print(f"  {k}: {v}")
 
-    # Compute training accuracy with best params for comparison
     reg = best_params.get('reg', 0.01)
     all_idx = list(range(n))
 
@@ -453,7 +438,6 @@ def main():
             correct += 1
     print(f"\nTraining accuracy with best params: {correct}/{n} ({100*correct/n:.1f}%)")
 
-    # Print copy-pasteable centroids
     print("\n--- COPY-PASTE for classify.py ---")
     print("class_centroids = {")
     for c in CLASSES:

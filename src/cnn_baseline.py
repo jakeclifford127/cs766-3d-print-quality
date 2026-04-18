@@ -1,21 +1,13 @@
 """
-CNN Baseline Comparison — YOLOv11s 3D Print Failure Detection
+YOLOv11s baseline comparison.
 
-Runs a pre-trained CNN (trained on 9,000+ images of spaghetti, stringing,
-and zits defects) against our first-layer dataset to demonstrate that
-existing deep-learning approaches fail to detect early-stage quality issues.
-
-This serves as the "existing approach" baseline for our project evaluation.
-
-Usage:
-    python cnn_baseline.py                  # run on default data/ directory
-    python cnn_baseline.py <data_dir>       # run on specified directory
+Runs pretrained CNN on our dataset to show existing
+deep learning fails at first-layer detection.
 """
 
 import sys
 import os
 
-# Try to import ultralytics; give helpful error if missing
 try:
     from ultralytics import YOLO
 except ImportError:
@@ -29,10 +21,7 @@ CONFIDENCE_THRESHOLD = 0.25
 
 
 def run_cnn_baseline(data_dir, conf_thresh=CONFIDENCE_THRESHOLD):
-    """Run the YOLOv11s CNN on all images and report detection results.
-
-    Returns a dict of {category: [(filename, detections_list), ...]}
-    """
+    """Run YOLO on all images, return detections."""
     model = YOLO(MODEL_PATH, task='detect')
     class_names = model.names
 
@@ -63,7 +52,7 @@ def run_cnn_baseline(data_dir, conf_thresh=CONFIDENCE_THRESHOLD):
 
 
 def print_baseline_report(results):
-    """Print a formatted comparison report."""
+    """Print comparison report."""
     print("=" * 65)
     print("CNN BASELINE: YOLOv11s 3D Print Failure Detection")
     print("Model trained on: ~9,000 images of spaghetti, stringing, zits")

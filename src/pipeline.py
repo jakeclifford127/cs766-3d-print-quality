@@ -1,10 +1,9 @@
 """
-Main pipeline — ties together all modules to process a single image
-or batch-evaluate a labeled dataset.
+Main pipeline for single image classification and batch eval.
 
 Usage:
-    python pipeline.py <image_path>              # classify a single image
-    python pipeline.py --batch <data_dir>        # evaluate on labeled dataset
+    python pipeline.py <image_path>
+    python pipeline.py --batch <data_dir>
 """
 
 import sys
@@ -19,21 +18,12 @@ from evaluate import print_evaluation_report
 
 
 def load_image(path, max_dim=512):
-    """Load an image as RGB numpy array using OpenCV (I/O only).
-
-    Optionally downscale so the largest dimension is at most max_dim.
-    This makes the from-scratch pipeline tractable on large images.
-
-    Args:
-        path: image file path
-        max_dim: max pixels for the longest side (None to skip resize)
-    """
+    """Load image as RGB, optionally downscale."""
     import cv2
     img = cv2.imread(path)
     if img is None:
         raise FileNotFoundError(f"Could not load image: {path}")
 
-    # Resize if needed (OpenCV resize is allowed — it's I/O utility, not filtering)
     if max_dim is not None:
         h, w = img.shape[:2]
         if max(h, w) > max_dim:
@@ -41,40 +31,21 @@ def load_image(path, max_dim=512):
             new_w, new_h = int(w * scale), int(h * scale)
             img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-    # OpenCV loads BGR, convert to RGB
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
 def process_single_image(image_rgb, sigma=1.0, low_ratio=0.05, high_ratio=0.15):
-    """Run the full pipeline on a single RGB image.
-
-    Args:
-        image_rgb: 3D numpy array (H, W, 3), uint8
-        sigma: Gaussian blur sigma for Canny
-        low_ratio: Canny low threshold ratio
-        high_ratio: Canny high threshold ratio
-
-    Returns:
-        label: classification string
-        confidence: float
-        features: dict of all extracted features
-        intermediates: dict of intermediate images for visualization
-    """
-    # Convert to grayscale
+    """Run full pipeline on one image."""
     grayscale = rgb_to_grayscale(image_rgb)
 
-    # Generate ROI mask
     roi_mask = generate_roi_mask(image_rgb, method='auto', cleanup=True)
 
-    # Run Canny edge detection
     edges, magnitude, direction = canny_edge_detection(
         grayscale, sigma=sigma, low_ratio=low_ratio, high_ratio=high_ratio
     )
 
-    # Extract features
     features = extract_features(grayscale, edges, magnitude, direction, roi_mask)
 
-    # Classify
     label, confidence = classify_layer(features)
 
     intermediates = {
@@ -89,7 +60,7 @@ def process_single_image(image_rgb, sigma=1.0, low_ratio=0.05, high_ratio=0.15):
 
 
 def visualize_results(image_rgb, intermediates, label, confidence, save_path=None):
-    """Display pipeline results as a figure with subplots."""
+    """Show pipeline results as subplots."""
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -109,10 +80,10 @@ def visualize_results(image_rgb, intermediates, label, confidence, save_path=Non
     axes[1, 1].imshow(intermediates['edges'], cmap='gray')
     axes[1, 1].set_title('Canny Edges')
 
-    # Edges overlaid on ROI
+    # overlay edges on original
     overlay = image_rgb.copy()
     edge_pixels = intermediates['edges'] > 0
-    overlay[edge_pixels] = [255, 0, 0]  # red edges
+    overlay[edge_pixels] = [255, 0, 0]
     axes[1, 2].imshow(overlay)
     axes[1, 2].set_title(f'Result: {label} ({confidence:.2f})')
 
@@ -131,17 +102,7 @@ def visualize_results(image_rgb, intermediates, label, confidence, save_path=Non
 
 
 def batch_evaluate(data_dir):
-    """Evaluate pipeline on a labeled dataset.
-
-    Expected directory structure:
-        data_dir/
-            optimal/        *.jpg, *.png
-            under_extruded/ *.jpg, *.png
-            over_extruded/  *.jpg, *.png
-
-    Returns:
-        y_true, y_pred: lists of true and predicted labels
-    """
+    """Evaluate on labeled dataset folders."""
     categories = ['optimal', 'under_extruded', 'over_extruded']
     y_true = []
     y_pred = []
@@ -170,10 +131,6 @@ def batch_evaluate(data_dir):
 
     return y_true, y_pred
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
