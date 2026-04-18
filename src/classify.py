@@ -474,6 +474,223 @@ def compute_line_spacing_uniformity(grayscale, magnitude, direction, roi_mask):
 
 
 # ---------------------------------------------------------------------------
+# Hough Transform Line Detection
+# ---------------------------------------------------------------------------
+
+def hough_line_transform(edges, roi_mask, rho_res=1.0, theta_res_deg=1.0):
+    """Compute the Hough Transform accumulator for line detection.
+
+    Parameterizes lines as rho = x*cos(theta) + y*sin(theta) and
+    accumulates votes from edge pixels inside the ROI.
+
+    Args:
+        edges: 2D binary edge map (0 or 255) from Canny
+        roi_mask: 2D binary ROI mask
+        rho_res: rho bin resolution in pixels
+        theta_res_deg: theta bin resolution in degrees
+
+    Returns:
+        accumulator: 2D vote array (num_rho_bins, num_theta_bins)
+        rho_values: 1D array mapping row index to rho in pixels
+        theta_values: 1D array of theta values in radians
+    """
+    h, w = edges.shape
+    diag = int(np.ceil(np.sqrt(h**2 + w**2)))
+
+    # Theta bins: 0 to 180 degrees
+    thetas = np.deg2rad(np.arange(0, 180, theta_res_deg))
+    cos_thetas = np.cos(thetas)
+    sin_thetas = np.sin(thetas)
+
+    # Rho bins: -diag to +diag
+    num_rhos = int(2 * diag / rho_res) + 1
+    rho_values = np.linspace(-diag, diag, num_rhos)
+
+    # Find edge pixels inside ROI
+    ys, xs = np.where((edges > 0) & (roi_mask > 0))
+    if len(ys) == 0:
+        return np.zeros((num_rhos, len(thetas)), dtype=np.int32), rho_values, thetas
+
+    # Vectorized voting: iterate over theta, vectorize over pixels
+    accumulator = np.zeros((num_rhos, len(thetas)), dtype=np.int32)
+    xs_f = xs.astype(np.float64)
+    ys_f = ys.astype(np.float64)
+
+    for t_idx in range(len(thetas)):
+        rhos = xs_f * cos_thetas[t_idx] + ys_f * sin_thetas[t_idx]
+        rho_idx = np.round((rhos + diag) / rho_res).astype(np.intp)
+        # Clip to valid range
+        valid = (rho_idx >= 0) & (rho_idx < num_rhos)
+        np.add.at(accumulator, (rho_idx[valid], t_idx), 1)
+
+    return accumulator, rho_values, thetas
+
+
+def extract_hough_peaks(accumulator, rho_values, theta_values,
+                        threshold_ratio=0.15, nms_rho_dist=10,
+                        nms_theta_dist=10, max_peaks=50):
+    """Extract line peaks from Hough accumulator with non-maximum suppression.
+
+    Args:
+        accumulator: 2D vote array from hough_line_transform
+        rho_values: 1D array of rho values
+        theta_values: 1D array of theta values in radians
+        threshold_ratio: minimum vote count as fraction of max
+        nms_rho_dist: minimum rho separation between peaks (bins)
+        nms_theta_dist: minimum theta separation between peaks (bins)
+        max_peaks: maximum number of peaks to return
+
+    Returns:
+        list of (rho, theta_rad, votes) tuples, sorted by votes descending
+    """
+    if accumulator.max() == 0:
+        return []
+
+    threshold = threshold_ratio * accumulator.max()
+
+    # Find all cells above threshold
+    candidates = []
+    above = np.where(accumulator >= threshold)
+    for ri, ti in zip(above[0], above[1]):
+        candidates.append((ri, ti, accumulator[ri, ti]))
+
+    # Sort by votes descending
+    candidates.sort(key=lambda x: x[2], reverse=True)
+
+    # Greedy NMS
+    accepted = []
+    for ri, ti, votes in candidates:
+        if len(accepted) >= max_peaks:
+            break
+        # Check if too close to any accepted peak
+        too_close = False
+        for ari, ati, _ in accepted:
+            # Circular theta distance
+            dt = abs(ti - ati)
+            dt = min(dt, len(theta_values) - dt)
+            if abs(ri - ari) <= nms_rho_dist and dt <= nms_theta_dist:
+                too_close = True
+                break
+        if not too_close:
+            accepted.append((ri, ti, votes))
+
+    # Convert to (rho, theta, votes)
+    peaks = []
+    for ri, ti, votes in accepted:
+        peaks.append((rho_values[ri], theta_values[ti], int(votes)))
+
+    return peaks
+
+
+def compute_hough_features(edges, magnitude, direction, roi_mask):
+    """Compute Hough Transform-based line detection features.
+
+    Detects lines in the edge map using the Hough Transform, then
+    computes 3 scalar features measuring line count, spacing regularity,
+    and pattern strength.
+
+    Args:
+        edges: 2D binary edge map (0 or 255)
+        magnitude: gradient magnitude from Sobel
+        direction: gradient direction from Sobel (radians)
+        roi_mask: 2D binary ROI mask
+
+    Returns:
+        dict with keys: hough_line_count, hough_spacing_regularity,
+                        hough_peak_ratio
+    """
+    neutral = {
+        'hough_line_count': 0.0,
+        'hough_spacing_regularity': 0.5,
+        'hough_peak_ratio': 0.0,
+    }
+
+    # Check for sufficient edge pixels
+    roi_area = np.sum(roi_mask)
+    if roi_area < 100:
+        return neutral
+
+    edge_count = np.sum((edges > 0) & (roi_mask > 0))
+    if edge_count < 10:
+        return neutral
+
+    # Run Hough Transform
+    accumulator, rho_values, theta_values = hough_line_transform(edges, roi_mask)
+
+    if accumulator.max() == 0:
+        return neutral
+
+    # Extract peaks
+    peaks = extract_hough_peaks(accumulator, rho_values, theta_values)
+    if len(peaks) == 0:
+        return neutral
+
+    # Get dominant extrusion direction from existing function
+    line_angle, dir_confidence = detect_line_direction(magnitude, direction, roi_mask)
+    # Convert line angle to Hough theta (perpendicular to line direction)
+    dominant_theta_rad = np.deg2rad(line_angle - 90.0) % np.pi
+
+    # --- Feature 1: hough_line_count ---
+    # Count lines within ±15 degrees of dominant direction
+    parallel_tolerance = np.deg2rad(15.0)
+    parallel_peaks = []
+    for rho, theta, votes in peaks:
+        # Circular angular distance
+        dt = abs(theta - dominant_theta_rad)
+        dt = min(dt, np.pi - dt)
+        if dt <= parallel_tolerance:
+            parallel_peaks.append((rho, theta, votes))
+
+    # Normalize by ROI scale
+    h, w = edges.shape
+    roi_diag = np.sqrt(h**2 + w**2)
+    hough_line_count = len(parallel_peaks) / (roi_diag / 100.0)
+
+    # --- Feature 2: hough_spacing_regularity ---
+    if len(parallel_peaks) >= 3:
+        # Sort parallel lines by rho and compute consecutive spacings
+        sorted_rhos = sorted([p[0] for p in parallel_peaks])
+        spacings = np.diff(sorted_rhos)
+        spacings = spacings[spacings > 0]  # remove duplicates
+
+        if len(spacings) >= 2:
+            mean_sp = np.mean(spacings)
+            if mean_sp > 1e-8:
+                cv = np.std(spacings) / mean_sp
+                hough_spacing_regularity = 1.0 / (1.0 + cv)
+            else:
+                hough_spacing_regularity = 0.5
+        else:
+            hough_spacing_regularity = 0.5
+    else:
+        hough_spacing_regularity = 0.5
+
+    # --- Feature 3: hough_peak_ratio ---
+    # Sum accumulator votes per theta to get a 1D theta profile
+    theta_profile = accumulator.sum(axis=0).astype(np.float64)
+    total_energy = theta_profile.sum()
+
+    if total_energy > 0:
+        # Find peak theta and sum energy in ±5 degree window
+        peak_theta_idx = np.argmax(theta_profile)
+        window = 5  # degrees (since theta_res = 1 degree)
+        n_thetas = len(theta_values)
+        peak_energy = 0.0
+        for di in range(-window, window + 1):
+            idx = (peak_theta_idx + di) % n_thetas
+            peak_energy += theta_profile[idx]
+        hough_peak_ratio = peak_energy / total_energy
+    else:
+        hough_peak_ratio = 0.0
+
+    return {
+        'hough_line_count': float(hough_line_count),
+        'hough_spacing_regularity': float(hough_spacing_regularity),
+        'hough_peak_ratio': float(hough_peak_ratio),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
@@ -500,6 +717,7 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
     roi_cov = compute_roi_coverage(roi_mask)
     line_uniformity = compute_line_spacing_uniformity(
         grayscale, magnitude, direction, roi_mask)
+    hough_feats = compute_hough_features(edges, magnitude, direction, roi_mask)
 
     return {
         'fill_density': fill_density,
@@ -515,6 +733,9 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
         'edge_to_gradient_ratio': edge_to_grad,
         'roi_coverage': roi_cov,
         'line_spacing_uniformity': line_uniformity,
+        'hough_line_count': hough_feats['hough_line_count'],
+        'hough_spacing_regularity': hough_feats['hough_spacing_regularity'],
+        'hough_peak_ratio': hough_feats['hough_peak_ratio'],
     }
 
 

@@ -12,7 +12,10 @@ import numpy as np
 # Add src to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from pipeline import load_image, process_single_image
+from pipeline import load_image
+from masking import rgb_to_grayscale, generate_roi_mask
+from edge_detection import canny_edge_detection
+from classify import extract_features
 
 
 FEAT_KEYS = [
@@ -40,10 +43,14 @@ def collect_features():
             path = os.path.join(cls_dir, fname)
             try:
                 img = load_image(path)
-                label, conf, features, _ = process_single_image(img)
+                grayscale = rgb_to_grayscale(img)
+                roi_mask = generate_roi_mask(img, method='auto', cleanup=True)
+                edges, magnitude, direction = canny_edge_detection(grayscale)
+                features = extract_features(grayscale, edges, magnitude, direction, roi_mask)
                 vec = np.array([features[k] for k in FEAT_KEYS])
                 class_features[cls].append(vec)
-                print(f"  {cls}/{fname}: uniformity={features['line_spacing_uniformity']:.4f}")
+                hough_info = f"hough_count={features.get('hough_line_count', 0):.2f}"
+                print(f"  {cls}/{fname}: {hough_info}, uniformity={features['line_spacing_uniformity']:.4f}")
             except Exception as e:
                 print(f"  ERROR {cls}/{fname}: {e}")
 
