@@ -642,10 +642,29 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
 
 
 def classify_layer(features, class_centroids=None, shared_inv_cov=None):
-    """LDA mahalanobis classifier.
+    """LDA Mahalanobis classifier over the 7-feature signature.
 
-    Uses pooled within-class covariance for robustness.
+    The 7 features describing each first-layer image are:
+        1. Fill density (with ROI coverage as the normalization term)
+        2. Gradient entropy
+        3. Gradient direction kurtosis
+        4. Edge-to-gradient ratio
+        5. Spectral energy (FFT)
+        6. Edge density CV
+        7. Line-spacing uniformity
+
+    Fill density and ROI coverage are paired: fill density measures
+    how much of the in-ROI region is print material, and ROI coverage
+    normalizes that against how much of the frame is the ROI itself.
+    They are passed to the classifier as separate columns purely for
+    numerical stability.
+
+    Uses pooled within-class covariance (LDA) for robustness on a
+    small dataset.
     """
+    # 7 features (fill_density + roi_coverage are a paired unit; see
+    # the docstring).  Order matters - it has to match the column order
+    # used when class_centroids and shared_inv_cov were trained.
     feat_keys = [
         'fill_density', 'gradient_entropy', 'gradient_dir_kurtosis',
         'edge_to_gradient_ratio', 'spectral_energy_ratio',

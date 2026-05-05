@@ -22,6 +22,10 @@ from classify import (
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
 CLASSES = ['optimal', 'under_extruded', 'over_extruded']
+# 7-feature signature.  fill_density and roi_coverage are paired
+# (one is the in-ROI density, the other normalizes against how much
+# of the frame is ROI); kept as separate columns for numerical
+# stability but conceptually a single feature.
 FEAT_KEYS = [
     'fill_density', 'gradient_entropy', 'gradient_dir_kurtosis',
     'edge_to_gradient_ratio', 'spectral_energy_ratio',
