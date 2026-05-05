@@ -642,29 +642,32 @@ def extract_features(grayscale, edges, magnitude, direction, roi_mask):
 
 
 def classify_layer(features, class_centroids=None, shared_inv_cov=None):
-    """LDA Mahalanobis classifier over the 7-feature signature.
+    """LDA Mahalanobis classifier over the 6-feature signature.
 
-    The 7 features describing each first-layer image are:
+    The 6 features describing each first-layer image are:
         1. Fill density (with ROI coverage as the normalization term)
         2. Gradient entropy
         3. Gradient direction kurtosis
         4. Edge-to-gradient ratio
-        5. Spectral energy (FFT)
-        6. Edge density CV
-        7. Line-spacing uniformity
+        5. Edge density CV
+        6. Line-spacing uniformity (with FFT spectral energy as a
+           frequency-domain helper for the same line-pattern signal)
 
-    Fill density and ROI coverage are paired: fill density measures
-    how much of the in-ROI region is print material, and ROI coverage
-    normalizes that against how much of the frame is the ROI itself.
-    They are passed to the classifier as separate columns purely for
-    numerical stability.
+    Two of the six features are split into a primary column and a
+    helper column for numerical stability:
+      * Fill density / ROI coverage - in-ROI density vs. how much of
+        the frame the ROI occupies.
+      * Line-spacing uniformity / spectral energy - spatial line-pitch
+        regularity vs. frequency-domain energy at that pitch.
 
     Uses pooled within-class covariance (LDA) for robustness on a
     small dataset.
     """
-    # 7 features (fill_density + roi_coverage are a paired unit; see
-    # the docstring).  Order matters - it has to match the column order
-    # used when class_centroids and shared_inv_cov were trained.
+    # 6 features expanded into 8 columns: fill_density + roi_coverage
+    # are a paired unit, and line_spacing_uniformity + spectral_energy
+    # are a paired unit.  See the docstring.  Order matters - it has
+    # to match the column order used when class_centroids and
+    # shared_inv_cov were trained.
     feat_keys = [
         'fill_density', 'gradient_entropy', 'gradient_dir_kurtosis',
         'edge_to_gradient_ratio', 'spectral_energy_ratio',

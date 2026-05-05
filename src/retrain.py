@@ -16,16 +16,16 @@ from edge_detection import canny_edge_detection
 from classify import extract_features
 
 
-# 7 features used by the classifier:
+# 6 features used by the classifier:
 #   1. Fill density (paired with roi_coverage as a normalization term)
 #   2. Gradient entropy
 #   3. Gradient direction kurtosis
 #   4. Edge-to-gradient ratio
-#   5. Spectral energy (FFT)
-#   6. Edge density CV
-#   7. Line-spacing uniformity
-# fill_density and roi_coverage are passed as separate columns purely
-# for numerical stability; conceptually they're one signature.
+#   5. Edge density CV
+#   6. Line-spacing uniformity (paired with spectral_energy_ratio as
+#      its frequency-domain helper for the same line-pattern signal)
+# Two of the six features are expanded into a primary + helper column
+# for numerical stability; conceptually each pair is one signature.
 FEAT_KEYS = [
     'fill_density', 'gradient_entropy', 'gradient_dir_kurtosis',
     'edge_to_gradient_ratio', 'spectral_energy_ratio',

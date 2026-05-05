@@ -22,10 +22,12 @@ from classify import (
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
 CLASSES = ['optimal', 'under_extruded', 'over_extruded']
-# 7-feature signature.  fill_density and roi_coverage are paired
-# (one is the in-ROI density, the other normalizes against how much
-# of the frame is ROI); kept as separate columns for numerical
-# stability but conceptually a single feature.
+# 6-feature signature.  Two pairs of columns are kept separate for
+# numerical stability but represent one feature each:
+#   * fill_density + roi_coverage  - in-ROI density and the ROI
+#     occupancy that normalizes it.
+#   * line_spacing_uniformity + spectral_energy_ratio - the spatial
+#     and frequency-domain views of line-pitch regularity.
 FEAT_KEYS = [
     'fill_density', 'gradient_entropy', 'gradient_dir_kurtosis',
     'edge_to_gradient_ratio', 'spectral_energy_ratio',
